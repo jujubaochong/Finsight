@@ -1,129 +1,216 @@
-# FinSight — AI 智能投研助手
+# FinSight - AI 驱动的智能投研平台
 
-> 输入一个 A 股代码，获得 AI 自动生成的财务解读、风险提示和结构化研报。
+![FinSight Logo](https://img.shields.io/badge/FinSight-AI投研平台-blue)
+![Python](https://img.shields.io/badge/Python-3.9+-green)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-lightblue)
+![React](https://img.shields.io/badge/React-18+-61dafb)
+![TypeScript](https://img.shields.io/badge/TypeScript-5+-3178c6)
 
-## 项目概述
+## 🚀 项目简介
 
-FinSight 解决的核心问题：个人投资者想研究股票基本面，但被工具门槛劝退。
+FinSight 是一个基于 AI 的智能投资研究平台，旨在为投资者提供数据驱动的股票分析、异动监控和行业对标功能。项目结合了实时数据获取、AI 分析和可视化界面，帮助用户做出更明智的投资决策。
 
-- 🔍 **智能搜索**：支持代码、名称模糊搜索
-- 🤖 **AI 快速分析**：10 秒内生成一句话总结 + 亮点/风险
-- 📊 **财务可视化**：收入利润趋势、核心比率、增速对比
-- 📝 **一键研报**：异步生成 5 章结构化研究报告
-- ⭐ **自选管理**：关注股票，追踪变化
+## ✨ 核心功能
 
-## 技术栈
+### 📊 股票数据分析
+- **实时股票搜索**：支持 A 股股票代码/名称模糊搜索
+- **财务数据获取**：从 AkShare 获取实时财务数据
+- **AI 智能分析**：基于 DeepSeek API 的股票分析和投资建议
+- **公告监控**：实时获取公司重要公告
 
-| 层 | 技术 |
-|---|------|
-| 前端 | React 18 + TypeScript + Vite + Tailwind CSS + Recharts |
-| 后端 | Python + FastAPI + SQLAlchemy + SQLite |
-| AI | DeepSeek-V3 (OpenAI SDK 兼容) |
-| 数据 | AkShare (A 股公开数据) |
+### 🔔 智能异动监控
+- **15+ 公告规则**：自动识别年报、季报、业绩预告等重要公告
+- **财务异动检测**：监控营收、利润、负债率等关键指标变化
+- **实时提醒系统**：自选股异动实时提醒
+- **历史记录管理**：30天异动记录保留
 
-## 快速开始
+### 📈 行业对标分析
+- **行业基准计算**：自动计算行业均值、中位数、最大值等统计指标
+- **同行业对比**：显示股票在行业中的排名和位置
+- **同行股票列表**：展示同行业其他公司数据对比
 
-### 1. 后端
+### 🎨 现代化界面
+- **响应式设计**：适配桌面和移动设备
+- **实时图表**：财务数据可视化展示
+- **用户体验优化**：搜索防抖、加载状态、错误提示
 
+## 🏗️ 技术架构
+
+### 后端 (FastAPI)
+```
+backend/
+├── app/
+│   ├── models/          # 数据模型
+│   ├── schemas/         # Pydantic 模式
+│   ├── routers/         # API 路由
+│   ├── services/        # 业务逻辑
+│   │   ├── data_fetcher.py      # 数据获取服务
+│   │   ├── ai_analyzer.py       # AI 分析服务
+│   │   ├── alert_monitor.py     # 异动监控服务
+│   │   ├── industry_analyzer.py # 行业分析服务
+│   │   └── report_generator.py  # 报告生成服务
+│   ├── database.py      # 数据库连接
+│   ├── config.py        # 配置管理
+│   └── main.py          # 应用入口
+├── requirements.txt     # Python 依赖
+└── .env.example        # 环境变量示例
+```
+
+### 前端 (React + TypeScript)
+```
+frontend/
+├── src/
+│   ├── components/      # React 组件
+│   ├── pages/          # 页面组件
+│   ├── hooks/          # 自定义 Hooks
+│   ├── services/       # API 服务
+│   └── types/          # TypeScript 类型定义
+├── public/             # 静态资源
+└── package.json        # Node.js 依赖
+```
+
+## 🛠️ 快速开始
+
+### 1. 环境要求
+- Python 3.9+
+- Node.js 18+
+- Git
+
+### 2. 后端设置
 ```bash
-cd backend
+# 克隆项目
+git clone https://github.com/yourusername/finsight.git
+cd finsight/backend
 
 # 创建虚拟环境
 python -m venv venv
 venv\Scripts\activate  # Windows
-# source venv/bin/activate  # Linux/Mac
+source venv/bin/activate  # Linux/Mac
 
 # 安装依赖
 pip install -r requirements.txt
 
 # 配置环境变量
 copy .env.example .env
-# 编辑 .env，填入你的 DEEPSEEK_API_KEY
+# 编辑 .env 文件，添加你的 DeepSeek API 密钥
 
-# 启动
+# 启动后端
 uvicorn app.main:app --reload --port 8000
 ```
 
-### 2. 前端
-
+### 3. 前端设置
 ```bash
-cd frontend
+cd ../frontend
 
 # 安装依赖
 npm install
 
-# 启动开发服务器
+# 启动前端
 npm run dev
 ```
 
-访问 http://localhost:3000 即可使用。
+### 4. 访问应用
+- 前端界面：http://localhost:3001
+- 后端 API：http://localhost:8000
+- API 文档：http://localhost:8000/docs
 
-## 项目结构
+## 📁 项目结构
 
 ```
 finsight/
-├── backend/
-│   ├── app/
-│   │   ├── main.py          # FastAPI 入口
-│   │   ├── config.py        # 配置管理
-│   │   ├── database.py      # 数据库连接
-│   │   ├── cache.py         # 内存缓存
-│   │   ├── logger.py        # 日志配置
-│   │   ├── models/          # ORM 模型
-│   │   ├── schemas/         # Pydantic 模型
-│   │   ├── routers/         # API 路由
-│   │   └── services/        # 业务逻辑
-│   │       ├── ai_analyzer.py      # AI 分析（DeepSeek）
-│   │       ├── data_fetcher.py     # 数据获取（AkShare）
-│   │       └── report_generator.py # 报告编排
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── components/      # 通用组件
-│   │   ├── pages/           # 页面组件
-│   │   ├── hooks/           # 自定义 Hook
-│   │   ├── services/        # API 封装
-│   │   └── types/           # TypeScript 类型
-│   └── package.json
-└── docs/                    # 产品文档（PRD/设计/策略）
+├── docs/                    # 项目文档
+│   ├── 01_产品愿景与目标.md
+│   ├── 02_竞品研究.md
+│   ├── 03_用户画像与核心场景.md
+│   ├── 04_核心功能PRD.md
+│   ├── 05_AI策略设计.md
+│   ├── 06_原型草图.md
+│   ├── 07_指标体系.md
+│   └── 08_项目路线图.md
+├── backend/                 # 后端代码
+├── frontend/               # 前端代码
+├── scripts/                # 辅助脚本
+├── .gitignore             # Git 忽略文件
+└── README.md              # 项目说明
 ```
 
-## API 概览
+## 🔧 配置说明
 
-| 方法 | 路径 | 描述 |
-|------|------|------|
-| GET | `/api/stocks/search?q=` | 搜索股票 |
-| GET | `/api/stocks/{code}` | 获取详情 + AI 分析 |
-| POST | `/api/reports/generate/{code}` | 生成研报 |
-| GET | `/api/reports/status/{task_id}` | 查询生成进度 |
-| GET | `/api/reports/{id}` | 获取报告内容 |
-| GET | `/api/reports/list` | 报告列表 |
-| GET | `/api/stocks/watchlist/list` | 获取自选列表 |
-| POST | `/api/stocks/watchlist/add` | 添加自选 |
-| DELETE | `/api/stocks/watchlist/{code}` | 删除自选 |
-| GET | `/api/alerts/list` | 异动提醒列表 |
-| POST | `/api/alerts/scan` | 手动触发异动扫描 |
-| POST | `/api/alerts/read/{id}` | 标记已读 |
-| GET | `/api/alerts/count` | 未读异动数 |
-| GET | `/api/industry/comparison/{code}` | 行业对标分析 |
-| GET | `/api/industry/peers/{code}` | 同行业股票列表 |
-| GET | `/api/industry/list` | 行业列表 |
+### 环境变量 (backend/.env)
+```env
+# AI API
+DEEPSEEK_API_KEY=your_deepseek_api_key_here
+DEEPSEEK_BASE_URL=https://api.deepseek.com
 
-## 配置说明
+# 数据库
+DATABASE_URL=sqlite:///./finsight.db
 
-核心配置项（`.env` 文件）：
+# 缓存设置
+CACHE_TTL_STOCK_LIST=3600
+CACHE_TTL_FINANCIALS=1800
+CACHE_TTL_INDUSTRY_BENCHMARKS=86400
+```
 
-- `DEEPSEEK_API_KEY`：必填，DeepSeek AI 的 API Key
-- `DATABASE_URL`：数据库连接串，默认 SQLite
-- `CACHE_TTL_ANALYSIS`：AI 分析缓存时间，默认 1 小时
+### 数据源
+- **AkShare**：A 股股票数据、财务数据、公告数据
+- **DeepSeek API**：AI 分析和报告生成
+- **SQLite**：本地数据存储（支持 PostgreSQL 扩展）
 
-## 开发状态
+## 🚢 部署
 
-- [x] MVP 核心功能完成
-- [x] 搜索 + 详情 + AI 分析 + 报告生成
-- [x] 自选股管理
-- [x] 异动监控（公告/股东/监管/财务异动规则引擎）
-- [x] 行业对标分析（同行排名 + 指标对比图表）
-- [ ] 用户系统（注册/登录）
-- [ ] 移动端适配
-- [ ] 批量赛道扫描
+### 开发环境
+```bash
+# 使用内置服务器
+uvicorn app.main:app --reload --port 8000
+npm run dev
+```
+
+### 生产环境建议
+1. **使用 PostgreSQL** 替换 SQLite
+2. **配置 Redis** 作为缓存
+3. **使用 Nginx** 作为反向代理
+4. **设置 SSL/TLS** 加密
+5. **配置监控和日志**
+
+## 📈 项目特色
+
+### 技术亮点
+- **全栈 TypeScript**：前后端类型安全
+- **异步任务调度**：后台定时数据更新
+- **智能缓存策略**：减少 API 调用
+- **错误处理机制**：优雅降级和重试
+- **模块化设计**：易于扩展和维护
+
+### 业务价值
+- **降低研究成本**：自动化数据收集和分析
+- **提高决策质量**：数据驱动的投资建议
+- **实时风险预警**：及时的市场异动提醒
+- **行业对标分析**：全面的竞争态势评估
+
+## 🤝 贡献指南
+
+1. Fork 项目
+2. 创建功能分支 (`git checkout -b feature/AmazingFeature`)
+3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
+4. 推送到分支 (`git push origin feature/AmazingFeature`)
+5. 开启 Pull Request
+
+## 📄 许可证
+
+本项目采用 MIT 许可证 - 查看 [LICENSE](LICENSE) 文件了解详情。
+
+## 📞 联系方式
+
+- 项目仓库：[https://github.com/yourusername/finsight](https://github.com/yourusername/finsight)
+- 问题反馈：[Issues](https://github.com/yourusername/finsight/issues)
+
+## 🙏 致谢
+
+- [AkShare](https://github.com/akfamily/akshare) - 提供股票数据接口
+- [DeepSeek](https://www.deepseek.com/) - 提供 AI 分析能力
+- [FastAPI](https://fastapi.tiangolo.com/) - 高性能 Python Web 框架
+- [React](https://react.dev/) - 前端开发框架
+
+---
+
+**FinSight - 让投资更智能，让决策更简单** 🚀
