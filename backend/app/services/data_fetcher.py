@@ -1,23 +1,29 @@
 """
 数据获取服务 — 封装 AkShare 调用
-优化点：
-  1. 加入缓存层，避免重复拉取
-  2. 统一错误处理和重试逻辑
-  3. 日志记录
-  4. 更健壮的数据解析
+
+设计要点：
+  1. 财务数据使用 ``ak.stock_financial_abstract`` 作为主数据源 —— 单次调用即可
+     拿到营收/净利润/净资产/经营现金流/EPS/ROE/资产负债率等完整指标，且数据结构
+     稳定（列为报告期，行为指标名）。
+  2. 公告使用 ``ak.stock_notice_report`` 的正确签名（symbol=公告类型, date=日期），
+     按近期交易日聚合后再按股票代码过滤。
+  3. 加入缓存层 + 重试 + 指数退避，避免被限频或偶发连接重置导致整体失败。
+  4. 当真实数据源完全不可用时，降级到模拟数据保证可用性。
 """
 from __future__ import annotations
+
 import logging
+import math
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 import akshare as ak
 from sqlalchemy.orm import Session
 
-from app.models.stock import Stock, Financial, Announcement
-from app.cache import cache, cached
+from app.cache import cache
 from app.config import settings
+from app.models.stock import Announcement, Financial, Stock
 
 logger = logging.getLogger(__name__)
 
@@ -25,20 +31,60 @@ logger = logging.getLogger(__name__)
 _API_SLEEP = 0.6
 # 最大重试次数
 _MAX_RETRIES = 3
+# 每只股票最多保留的财务报告期数
+_MAX_PERIODS = 8
+# 公告池回溯的交易日天数
+_NOTICE_LOOKBACK_DAYS = 5
 
 
 def _retry_akshare(func, *args, retries: int = _MAX_RETRIES, **kwargs):
-    """带重试的 AkShare 调用"""
+    """带重试 + 指数退避的 AkShare 调用"""
+    last_exc: Exception | None = None
     for attempt in range(retries):
         try:
             time.sleep(_API_SLEEP)
             return func(*args, **kwargs)
-        except Exception as e:
-            logger.warning(f"AkShare 调用失败 (attempt {attempt + 1}/{retries}): {func.__name__} - {e}")
-            if attempt == retries - 1:
-                raise
-            time.sleep(2 ** attempt)  # 指数退避
+        except Exception as e:  # noqa: BLE001 - akshare 抛出的异常类型不固定
+            last_exc = e
+            logger.warning(
+                "AkShare 调用失败 (attempt %s/%s): %s - %s",
+                attempt + 1,
+                retries,
+                getattr(func, "__name__", str(func)),
+                e,
+            )
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # 指数退避
+    if last_exc is not None:
+        raise last_exc
     return None
+
+
+def _to_float(val) -> Optional[float]:
+    """安全地把任意值转成 float，无法解析时返回 None"""
+    if val is None:
+        return None
+    try:
+        if isinstance(val, str):
+            cleaned = val.strip().replace(",", "")
+            if cleaned in ("", "--", "None", "nan", "NaN"):
+                return None
+            num = float(cleaned)
+        else:
+            num = float(val)
+        if math.isnan(num) or math.isinf(num):
+            return None
+        return num
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_yi(val) -> Optional[float]:
+    """元 → 亿元（保留 4 位小数）"""
+    num = _to_float(val)
+    if num is None:
+        return None
+    return round(num / 1e8, 4)
 
 
 class DataFetcher:
@@ -48,42 +94,27 @@ class DataFetcher:
 
     @staticmethod
     def search_stock(db: Session, keyword: str) -> list[dict]:
-        """模糊搜索股票（优先数据库，缓存加速）"""
+        """模糊搜索股票（优先数据库，未命中再同步列表）"""
         if not keyword or not keyword.strip():
             return []
 
         keyword = keyword.strip()
 
-        # 先查数据库
-        results = (
-            db.query(Stock)
-            .filter(
-                Stock.is_active == True,
-                (Stock.code.contains(keyword) | Stock.name.contains(keyword)),
-            )
-            .limit(10)
-            .all()
-        )
-
+        results = DataFetcher._query_stocks(db, keyword)
         if results:
-            return [
-                {
-                    "code": s.code,
-                    "name": s.name,
-                    "market": s.market,
-                    "industry": s.industry,
-                }
-                for s in results
-            ]
+            return results
 
         # 数据库没有 → 同步股票列表后重新搜索
-        logger.info(f"数据库未命中关键词 '{keyword}'，尝试同步股票列表")
+        logger.info("数据库未命中关键词 '%s'，尝试同步股票列表", keyword)
         DataFetcher._sync_stock_list(db)
+        return DataFetcher._query_stocks(db, keyword)
 
-        results = (
+    @staticmethod
+    def _query_stocks(db: Session, keyword: str) -> list[dict]:
+        rows = (
             db.query(Stock)
             .filter(
-                Stock.is_active == True,
+                Stock.is_active.is_(True),
                 (Stock.code.contains(keyword) | Stock.name.contains(keyword)),
             )
             .limit(10)
@@ -96,13 +127,12 @@ class DataFetcher:
                 "market": s.market,
                 "industry": s.industry,
             }
-            for s in results
+            for s in rows
         ]
 
     @staticmethod
     def _sync_stock_list(db: Session):
-        """同步 A 股股票列表到数据库（带缓存控制）"""
-        # 检查缓存标记，避免短时间重复同步
+        """同步 A 股股票列表到数据库（带缓存控制，避免短时间重复同步）"""
         if cache.get("stock_list_synced"):
             logger.debug("股票列表近期已同步，跳过")
             return
@@ -114,42 +144,122 @@ class DataFetcher:
                 logger.warning("获取股票列表为空")
                 return
 
+            existing_codes = {c for (c,) in db.query(Stock.code).all()}
             count = 0
             for _, row in df.iterrows():
                 code = str(row.get("code", "")).strip()
-                name = str(row.get("name", "")).strip()
-                if not code or not name or len(code) != 6:
+                name = str(row.get("name", "")).strip().replace(" ", "")
+                if not code or not name or len(code) != 6 or not code.isdigit():
                     continue
-                existing = db.query(Stock).filter(Stock.code == code).first()
-                if not existing:
-                    db.add(Stock(
+                if code in existing_codes:
+                    continue
+                db.add(
+                    Stock(
                         code=code,
                         name=name,
                         market=DataFetcher._guess_market(code),
-                    ))
-                    count += 1
+                    )
+                )
+                existing_codes.add(code)
+                count += 1
+
             db.commit()
             cache.set("stock_list_synced", True, settings.cache_ttl_stock_list)
-            logger.info(f"股票列表同步完成，新增 {count} 只")
-        except Exception as e:
+            logger.info("股票列表同步完成，新增 %s 只", count)
+        except Exception as e:  # noqa: BLE001
             db.rollback()
-            logger.error(f"同步股票列表失败: {e}")
+            logger.error("同步股票列表失败: %s", e)
 
     @staticmethod
     def _guess_market(code: str) -> str:
         if code.startswith("6"):
             return "SH"
-        elif code.startswith(("0", "3")):
+        if code.startswith(("0", "3")):
             return "SZ"
-        elif code.startswith(("8", "4")):
+        if code.startswith(("8", "4")):
             return "BJ"
         return "SZ"
+
+    # ========== 行业分类 ==========
+
+    @staticmethod
+    def _sync_industries(db: Session, force: bool = False) -> int:
+        """同步申万一级行业分类到 Stock.industry
+
+        采用「申万一级行业列表 + 各行业成分股」构建 code→行业 映射后批量写入。
+        申万一级共 31 个行业、覆盖全部 A 股，是标准且稳定的分类口径。
+        （东方财富个股接口在部分环境会被限流，故不逐只查询。）
+        """
+        if not force and cache.get("industries_synced"):
+            logger.debug("行业分类近期已同步，跳过")
+            return 0
+
+        try:
+            industry_df = _retry_akshare(ak.sw_index_first_info)
+        except Exception as e:  # noqa: BLE001
+            logger.error("获取申万一级行业列表失败: %s", e)
+            return 0
+
+        if industry_df is None or industry_df.empty:
+            logger.warning("申万一级行业列表为空")
+            return 0
+
+        # code（去掉 .SI 后缀）→ 行业名称
+        code_to_industry: dict[str, str] = {}
+        for _, row in industry_df.iterrows():
+            sw_code = str(row.get("行业代码", "")).split(".")[0].strip()
+            industry_name = str(row.get("行业名称", "")).strip()
+            if not sw_code or not industry_name:
+                continue
+            try:
+                cons = _retry_akshare(
+                    ak.index_component_sw, symbol=sw_code, retries=2
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("获取行业 %s(%s) 成分股失败: %s", industry_name, sw_code, e)
+                continue
+            if cons is None or cons.empty or "证券代码" not in cons.columns:
+                continue
+            for code in cons["证券代码"].astype(str):
+                code = code.strip()
+                if len(code) == 6 and code.isdigit():
+                    code_to_industry[code] = industry_name
+
+        if not code_to_industry:
+            logger.warning("未能构建任何行业映射")
+            return 0
+
+        # 批量更新数据库
+        updated = 0
+        try:
+            stocks = (
+                db.query(Stock)
+                .filter(Stock.code.in_(list(code_to_industry.keys())))
+                .all()
+            )
+            for stock in stocks:
+                new_industry = code_to_industry.get(stock.code)
+                if new_industry and stock.industry != new_industry:
+                    stock.industry = new_industry
+                    updated += 1
+            db.commit()
+            cache.set("industries_synced", True, settings.cache_ttl_industry)
+            logger.info(
+                "行业分类同步完成：映射 %s 只，更新 %s 只",
+                len(code_to_industry),
+                updated,
+            )
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            logger.error("写入行业分类失败: %s", e)
+        return updated
+
 
     # ========== 股票详情 ==========
 
     @staticmethod
     def get_stock_detail(db: Session, code: str) -> dict | None:
-        """获取股票详情，触发数据同步"""
+        """获取股票详情，按需触发数据同步"""
         stock = db.query(Stock).filter(Stock.code == code).first()
         if not stock:
             DataFetcher._sync_stock_list(db)
@@ -157,18 +267,19 @@ class DataFetcher:
         if not stock:
             return None
 
-        # 检查是否需要拉取财务数据（有缓存控制）
+        # 按需拉取财务数据（缓存控制）
         cache_key = f"fin_synced:{code}"
         if not stock.financials and not cache.get(cache_key):
             DataFetcher._sync_financials(db, stock)
             cache.set(cache_key, True, settings.cache_ttl_financials)
 
-        # 检查是否需要拉取公告
+        # 按需拉取公告
         cache_key_ann = f"ann_synced:{code}"
         if not stock.announcements and not cache.get(cache_key_ann):
             DataFetcher._sync_announcements(db, stock)
             cache.set(cache_key_ann, True, settings.cache_ttl_financials)
 
+        db.refresh(stock)
         return {
             "code": stock.code,
             "name": stock.name,
@@ -180,168 +291,160 @@ class DataFetcher:
 
     # ========== 财务数据 ==========
 
+    # stock_financial_abstract 指标名 → 解析方式
+    # （value 为 None 表示直接取数后转亿元；ratio=True 表示是比率，原样保留）
+    _ABSTRACT_METRICS = {
+        "revenue": (("营业总收入", "营业收入"), False),
+        "net_profit": (("净利润", "归母净利润"), False),
+        "total_equity": (("股东权益合计(净资产)", "归属于母公司股东权益合计"), False),
+        "operating_cash_flow": (("经营现金流量净额", "经营活动产生的现金流量净额"), False),
+        "goodwill": (("商誉",), False),
+        "eps": (("基本每股收益",), True),
+    }
+
     @staticmethod
     def _sync_financials(db: Session, stock: Stock):
-        """拉取财务数据（三大报表核心字段）"""
-        logger.info(f"开始拉取 {stock.code} {stock.name} 财务数据...")
-        
-        # 先尝试 AkShare 接口
-        ak_attempt_success = False
-        
-        try:
-            # 尝试使用 stock_financial_report_sina 接口（测试中这个接口可用）
-            df = _retry_akshare(
-                ak.stock_financial_report_sina,
-                stock=stock.code,
-                symbol="利润表",
-            )
+        """拉取财务数据（主用 stock_financial_abstract，失败则降级模拟数据）"""
+        logger.info("开始拉取 %s %s 财务数据...", stock.code, stock.name)
 
-            if df is not None and not df.empty:
-                logger.info(f"AkShare 接口成功获取数据，形状: {df.shape}")
-                
-                # 解析新浪财务数据
-                count = DataFetcher._parse_sina_financials(db, stock, df)
-                if count > 0:
-                    ak_attempt_success = True
-                    logger.info(f"{stock.code} AkShare 财务数据同步完成，新增 {count} 条")
-                else:
-                    logger.warning(f"{stock.code} AkShare 数据解析失败或数据为空")
-            else:
-                logger.warning(f"{stock.code} AkShare 返回空数据")
-                
-        except Exception as e:
-            logger.warning(f"AkShare 接口失败 {stock.code}: {e}")
-        
-        # 如果 AkShare 失败，使用降级方案
-        if not ak_attempt_success:
-            logger.info(f"{stock.code} 使用降级方案生成模拟数据")
-            DataFetcher._use_fallback_financials(db, stock)
-    
-    @staticmethod
-    def _parse_sina_financials(db: Session, stock: Stock, df) -> int:
-        """解析新浪财务数据"""
+        try:
+            df = _retry_akshare(ak.stock_financial_abstract, symbol=stock.code)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("AkShare 财务接口失败 %s: %s", stock.code, e)
+            df = None
+
         count = 0
-        
-        # 新浪报表的列通常是日期格式如 "20250331"
-        date_columns = []
-        for col in df.columns:
-            if isinstance(col, str) and col.isdigit() and len(col) == 8:
-                date_columns.append(col)
-        
-        if not date_columns:
-            logger.warning(f"{stock.code} 未找到日期列")
+        if df is not None and not df.empty:
+            try:
+                count = DataFetcher._parse_abstract_financials(db, stock, df)
+            except Exception as e:  # noqa: BLE001
+                db.rollback()
+                logger.error("解析财务数据失败 %s: %s", stock.code, e)
+                count = 0
+
+        if count > 0:
+            logger.info("%s 财务数据同步完成，新增 %s 条", stock.code, count)
+            return
+
+        logger.warning("%s 无法获取真实财务数据，使用降级方案", stock.code)
+        DataFetcher._use_fallback_financials(db, stock)
+
+    @staticmethod
+    def _parse_abstract_financials(db: Session, stock: Stock, df) -> int:
+        """解析 stock_financial_abstract 返回的 DataFrame
+
+        结构：列含 8 位日期列（如 '20250331'）+ '选项' + '指标'，行为各项指标。
+        """
+        if "指标" not in df.columns:
+            logger.warning("%s 财务数据缺少 '指标' 列", stock.code)
             return 0
-        
-        # 按日期排序，取最近4个报告期
-        date_columns_sorted = sorted(date_columns, reverse=True)[:4]
-        
-        for date_str in date_columns_sorted:
-            # 转换日期格式 "20250331" → "2025Q1"
+
+        date_cols = [
+            c
+            for c in df.columns
+            if isinstance(c, str) and c.isdigit() and len(c) == 8
+        ]
+        if not date_cols:
+            logger.warning("%s 财务数据未找到报告期列", stock.code)
+            return 0
+
+        # 取最近 N 个报告期
+        date_cols = sorted(date_cols, reverse=True)[:_MAX_PERIODS]
+
+        # 构建 指标 → Series 的索引（同名指标取第一次出现）
+        metric_index: dict[str, int] = {}
+        indicators = df["指标"].tolist()
+        for idx, name in enumerate(indicators):
+            if isinstance(name, str) and name not in metric_index:
+                metric_index[name] = idx
+
+        def get_value(metric_names: tuple[str, ...], col: str):
+            for name in metric_names:
+                if name in metric_index:
+                    return df.iloc[metric_index[name]][col]
+            return None
+
+        # 已存在的报告期，避免重复插入
+        existing_periods = {
+            p
+            for (p,) in db.query(Financial.report_period).filter(
+                Financial.stock_id == stock.id
+            )
+        }
+
+        count = 0
+        for date_str in date_cols:
             period = DataFetcher._date_to_period(
                 f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:8]}"
             )
-            if not period:
+            if not period or period in existing_periods:
                 continue
-            
-            # 检查是否已存在
-            if db.query(Financial).filter(
-                Financial.stock_id == stock.id,
-                Financial.report_period == period,
-            ).first():
-                continue
-            
-            # 从 DataFrame 中提取数据
-            revenue = DataFetcher._get_sina_value(df, date_str, "营业收入")
-            net_profit = DataFetcher._get_sina_value(df, date_str, "净利润")
-            
-            if revenue is None and net_profit is None:
-                continue
-            
-            fin = Financial(
-                stock_id=stock.id,
-                report_period=period,
-                report_type="Y" if period.endswith("Q4") else "Q",
-                revenue=revenue,
-                net_profit=net_profit,
-                total_assets=None,  # 新浪接口可能没有这些字段
-                total_equity=None,
-                operating_cash_flow=None,
+
+            revenue = _to_yi(get_value(("营业总收入", "营业收入"), date_str))
+            net_profit = _to_yi(get_value(("净利润", "归母净利润"), date_str))
+            total_equity = _to_yi(
+                get_value(("股东权益合计(净资产)", "归属于母公司股东权益合计"), date_str)
             )
-            db.add(fin)
-            count += 1
-        
-        if count > 0:
-            db.commit()
-        
-        return count
-
-    @staticmethod
-    def _sync_financials_fallback(db: Session, stock: Stock):
-        """备选财务数据拉取方案"""
-        try:
-            logger.info(f"尝试备选方案拉取 {stock.code} 财务数据...")
-            # 使用利润表接口
-            df = _retry_akshare(
-                ak.stock_financial_report_sina,
-                stock=stock.code,
-                symbol="利润表",
+            operating_cash_flow = _to_yi(
+                get_value(("经营现金流量净额", "经营活动产生的现金流量净额"), date_str)
             )
-            if df is None or df.empty:
-                return
+            goodwill = _to_yi(get_value(("商誉",), date_str))
+            eps = _to_float(get_value(("基本每股收益",), date_str))
 
-            # 尝试解析新浪财务数据
-            for col in list(df.columns)[1:9]:  # 最近8个报告期
-                if not isinstance(col, str) or not col.isdigit():
-                    continue
+            debt_ratio = _to_float(get_value(("资产负债率",), date_str))
 
-                period = DataFetcher._date_to_period(
-                    f"{col[:4]}-{col[4:6]}-{col[6:8]}"
-                )
-                if not period:
-                    continue
+            # 由净资产 + 资产负债率推导总资产 / 总负债
+            total_assets = None
+            total_liability = None
+            if total_equity is not None and debt_ratio is not None and 0 <= debt_ratio < 100:
+                total_assets = round(total_equity / (1 - debt_ratio / 100), 4)
+                total_liability = round(total_assets - total_equity, 4)
 
-                if db.query(Financial).filter(
-                    Financial.stock_id == stock.id,
-                    Financial.report_period == period,
-                ).first():
-                    continue
+            # 全部关键字段都没有 → 跳过该期
+            if revenue is None and net_profit is None and total_equity is None:
+                continue
 
-                revenue = DataFetcher._get_sina_value(df, col, "营业收入")
-                net_profit = DataFetcher._get_sina_value(df, col, "净利润")
-
-                if revenue is None and net_profit is None:
-                    continue
-
-                fin = Financial(
+            db.add(
+                Financial(
                     stock_id=stock.id,
                     report_period=period,
                     report_type="Y" if period.endswith("Q4") else "Q",
                     revenue=revenue,
                     net_profit=net_profit,
+                    total_assets=total_assets,
+                    total_equity=total_equity,
+                    total_liability=total_liability,
+                    operating_cash_flow=operating_cash_flow,
+                    goodwill=goodwill,
+                    eps=eps,
                 )
-                db.add(fin)
+            )
+            existing_periods.add(period)
+            count += 1
 
+        if count > 0:
             db.commit()
-            logger.info(f"{stock.code} 备选方案同步完成")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"备选方案也失败 {stock.code}: {e}")
+        return count
 
     @staticmethod
-    def _get_sina_value(df, col: str, field: str) -> Optional[float]:
-        """从新浪报表 DataFrame 获取某字段值"""
+    def _use_fallback_financials(db: Session, stock: Stock):
+        """真实数据不可用时，生成并保存模拟财务数据"""
         try:
-            if field not in df.iloc[:, 0].values:
-                return None
-            row = df[df.iloc[:, 0] == field]
-            if row.empty or col not in row.columns:
-                return None
-            val = row.iloc[0][col]
-            if val is None or str(val).strip() in ("", "None", "nan"):
-                return None
-            return round(float(val) / 1e8, 4)  # 元 → 亿元
-        except (ValueError, TypeError, IndexError):
-            return None
+            from app.services.data_fetcher_fallback import DataFetcherFallback
+
+            mock_financials = DataFetcherFallback.generate_mock_financials(
+                db, stock.id, stock.code, stock.name
+            )
+            saved_count = DataFetcherFallback.save_mock_financials(
+                db, stock.id, mock_financials
+            )
+            if saved_count > 0:
+                logger.info("%s 模拟财务数据生成完成，新增 %s 条", stock.code, saved_count)
+            else:
+                logger.warning("%s 模拟财务数据生成失败或已存在", stock.code)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            logger.error("降级方案失败 %s: %s", stock.code, e)
 
     @staticmethod
     def _date_to_period(date_str: str) -> Optional[str]:
@@ -355,36 +458,21 @@ class DataFetcher:
         except (IndexError, ValueError):
             return None
 
-    @staticmethod
-    def _parse_float(row, field: str) -> Optional[float]:
-        """安全解析浮点数"""
-        try:
-            val = row.get(field)
-            if val is None or str(val).strip() in ("", "None", "nan", "--"):
-                return None
-            result = float(val)
-            # 如果数值很大，可能是元单位，转亿
-            if abs(result) > 1e9:
-                return round(result / 1e8, 4)
-            return round(result, 4)
-        except (ValueError, TypeError):
-            return None
-
-    # ========== 财务数据获取（供 AI 使用）==========
+    # ========== 财务数据获取（供 API / AI 使用）==========
 
     @staticmethod
     def get_financials(db: Session, stock: Stock) -> list[dict]:
         """获取股票的财务数据列表（含计算指标）"""
         if not stock.financials:
             DataFetcher._sync_financials(db, stock)
+            db.refresh(stock)
 
-        # 按报告期排序
         financials_sorted = sorted(
             stock.financials or [],
             key=lambda f: f.report_period,
         )
 
-        results = []
+        results: list[dict] = []
         for fin in financials_sorted:
             item: dict = {
                 "report_period": fin.report_period,
@@ -400,19 +488,19 @@ class DataFetcher:
                 "pb_ratio": fin.pb_ratio,
             }
 
-            # 计算净利率
+            # 净利率
             if fin.revenue and fin.revenue > 0 and fin.net_profit is not None:
                 item["net_margin"] = round(fin.net_profit / fin.revenue * 100, 2)
             else:
                 item["net_margin"] = None
 
-            # 计算 ROE
+            # ROE
             if fin.total_equity and fin.total_equity > 0 and fin.net_profit is not None:
                 item["roe"] = round(fin.net_profit / fin.total_equity * 100, 2)
             else:
                 item["roe"] = None
 
-            # 计算资产负债率
+            # 资产负债率
             if fin.total_assets and fin.total_assets > 0:
                 liability = fin.total_liability or (
                     fin.total_assets - (fin.total_equity or 0)
@@ -421,28 +509,29 @@ class DataFetcher:
             else:
                 item["debt_ratio"] = None
 
-            # 同比增速：找去年同期
+            # 同比增速
             same_q = DataFetcher._find_same_period_last_year(results, fin.report_period)
-            if same_q:
-                if same_q.get("revenue") and same_q["revenue"] > 0 and fin.revenue:
-                    item["revenue_growth_yoy"] = round(
-                        (fin.revenue - same_q["revenue"]) / abs(same_q["revenue"]) * 100, 2
-                    )
-                else:
-                    item["revenue_growth_yoy"] = None
-
-                if same_q.get("net_profit") and same_q["net_profit"] != 0 and fin.net_profit:
-                    item["profit_growth_yoy"] = round(
-                        (fin.net_profit - same_q["net_profit"]) / abs(same_q["net_profit"]) * 100, 2
-                    )
-                else:
-                    item["profit_growth_yoy"] = None
+            if same_q and same_q.get("revenue") and same_q["revenue"] > 0 and fin.revenue:
+                item["revenue_growth_yoy"] = round(
+                    (fin.revenue - same_q["revenue"]) / abs(same_q["revenue"]) * 100, 2
+                )
             else:
                 item["revenue_growth_yoy"] = None
+
+            if (
+                same_q
+                and same_q.get("net_profit")
+                and same_q["net_profit"] != 0
+                and fin.net_profit is not None
+            ):
+                item["profit_growth_yoy"] = round(
+                    (fin.net_profit - same_q["net_profit"]) / abs(same_q["net_profit"]) * 100,
+                    2,
+                )
+            else:
                 item["profit_growth_yoy"] = None
 
-            # 毛利率（暂缺毛利数据，留空）
-            item["gross_margin"] = None
+            item["gross_margin"] = None  # 摘要接口未直接提供毛利额，留空
 
             results.append(item)
 
@@ -453,7 +542,7 @@ class DataFetcher:
         """查找去年同期数据"""
         try:
             year = int(period[:4])
-            q = period[4:]  # 如 "Q1"
+            q = period[4:]
             target = f"{year - 1}{q}"
             for r in results:
                 if r["report_period"] == target:
@@ -465,130 +554,150 @@ class DataFetcher:
     # ========== 公告 ==========
 
     @staticmethod
-    def _sync_announcements(db: Session, stock: Stock):
-        """拉取近期公告"""
-        logger.info(f"开始拉取 {stock.code} 公告...")
-        try:
-            df = _retry_akshare(ak.stock_notice_report, symbol=stock.code)
+    def _fetch_notice_pool(db_today: Optional[date] = None) -> dict[str, list[dict]]:
+        """拉取近期公告并按股票代码归集（带缓存，供所有股票复用）
+
+        ``ak.stock_notice_report`` 只能按"日期 + 公告类型"查询全市场公告，
+        因此这里回溯最近若干个工作日，聚合后按代码索引。
+        """
+        cached_pool = cache.get("notice_pool")
+        if cached_pool is not None:
+            return cached_pool
+
+        pool: dict[str, list[dict]] = {}
+        today = db_today or date.today()
+        collected_days = 0
+        offset = 0
+        # 最多向前找 14 个自然日，凑够 _NOTICE_LOOKBACK_DAYS 个有数据的交易日
+        while collected_days < _NOTICE_LOOKBACK_DAYS and offset < 14:
+            day = today - timedelta(days=offset)
+            offset += 1
+            if day.weekday() >= 5:  # 跳过周末
+                continue
+            try:
+                df = _retry_akshare(
+                    ak.stock_notice_report,
+                    symbol="全部",
+                    date=day.strftime("%Y%m%d"),
+                    retries=1,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("获取 %s 公告失败: %s", day, e)
+                continue
             if df is None or df.empty:
-                # 尝试全量公告按名称过滤
-                df = _retry_akshare(ak.stock_notice_report, symbol="all")
-                if df is None or df.empty:
-                    logger.warning(f"{stock.code} 无公告数据")
-                    return
-                # 按股票名称过滤
-                df = df[df["name"].str.contains(stock.name, na=False)]
-
-            df = df.sort_values("notice_date", ascending=False).head(20)
-
-            count = 0
+                continue
+            collected_days += 1
             for _, row in df.iterrows():
-                title = str(row.get("title", "")).strip()
-                if not title:
+                code = str(row.get("代码", "")).strip()
+                if not code:
                     continue
+                pool.setdefault(code, []).append(
+                    {
+                        "title": str(row.get("公告标题", "")).strip(),
+                        "date": str(row.get("公告日期", "")).strip(),
+                        "url": str(row.get("网址", "")).strip(),
+                    }
+                )
 
-                pub_date_str = str(row.get("notice_date", ""))
-                try:
-                    pub_date = datetime.strptime(pub_date_str[:10], "%Y-%m-%d").date()
-                except (ValueError, IndexError):
-                    continue
+        cache.set("notice_pool", pool, 3600)
+        return pool
 
-                url = str(row.get("pdf_link", "")) if "pdf_link" in row.index else ""
+    @staticmethod
+    def _sync_announcements(db: Session, stock: Stock):
+        """拉取近期公告，真实数据缺失时降级到模拟公告"""
+        logger.info("开始拉取 %s 公告...", stock.code)
+        saved = 0
+        try:
+            pool = DataFetcher._fetch_notice_pool()
+            items = pool.get(stock.code, [])
+            saved = DataFetcher._save_announcements(db, stock, items)
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            logger.error("同步公告失败 %s: %s", stock.code, e)
 
-                # 避免重复
-                if db.query(Announcement).filter(
-                    Announcement.stock_id == stock.id,
-                    Announcement.title == title,
-                ).first():
-                    continue
+        if saved > 0:
+            logger.info("%s 公告同步完成，新增 %s 条", stock.code, saved)
+            return
 
-                db.add(Announcement(
+        # 没拿到真实公告 → 降级模拟公告
+        DataFetcher._use_fallback_announcements(db, stock)
+
+    @staticmethod
+    def _save_announcements(db: Session, stock: Stock, items: list[dict]) -> int:
+        count = 0
+        existing_titles = {
+            t
+            for (t,) in db.query(Announcement.title).filter(
+                Announcement.stock_id == stock.id
+            )
+        }
+        for item in items[:20]:
+            title = item.get("title", "").strip()
+            if not title or title in existing_titles:
+                continue
+            pub_date = DataFetcher._parse_date(item.get("date", ""))
+            if pub_date is None:
+                continue
+            db.add(
+                Announcement(
                     stock_id=stock.id,
                     title=title,
                     publish_date=pub_date,
-                    url=url,
-                ))
-                count += 1
-
+                    url=item.get("url", ""),
+                )
+            )
+            existing_titles.add(title)
+            count += 1
+        if count > 0:
             db.commit()
-            logger.info(f"{stock.code} 公告同步完成，新增 {count} 条")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"同步公告失败 {stock.code}: {e}")
+        return count
 
     @staticmethod
-    def _use_fallback_financials(db: Session, stock: Stock):
-        """使用降级方案生成财务数据"""
+    def _use_fallback_announcements(db: Session, stock: Stock):
+        """生成并保存模拟公告"""
         try:
-            # 导入降级模块
             from app.services.data_fetcher_fallback import DataFetcherFallback
-            
-            # 生成模拟数据
-            mock_financials = DataFetcherFallback.generate_mock_financials(
-                db, stock.id, stock.code, stock.name
-            )
-            
-            # 保存到数据库
-            saved_count = DataFetcherFallback.save_mock_financials(db, stock.id, mock_financials)
-            
-            if saved_count > 0:
-                logger.info(f"{stock.code} 模拟财务数据生成完成，新增 {saved_count} 条")
-            else:
-                logger.warning(f"{stock.code} 模拟财务数据生成失败或已存在")
-                
-        except Exception as e:
-            logger.error(f"降级方案失败 {stock.code}: {e}")
-            db.rollback()
-    
-    @staticmethod
-    def _sync_financials_fallback(db: Session, stock: Stock):
-        """备选财务数据拉取方案（旧版本，保持兼容）"""
-        try:
-            logger.info(f"尝试备选方案拉取 {stock.code} 财务数据...")
-            # 使用利润表接口
-            df = _retry_akshare(
-                ak.stock_financial_report_sina,
-                stock=stock.code,
-                symbol="利润表",
-            )
-            if df is None or df.empty:
-                return
 
+            mock = DataFetcherFallback.generate_mock_announcements(
+                stock.code, stock.name
+            )
             count = 0
-            for col in list(df.columns)[1:9]:  # 最近8个报告期
-                if not isinstance(col, str) or not col.isdigit():
-                    continue
-
-                period = DataFetcher._date_to_period(
-                    f"{col[:4]}-{col[4:6]}-{col[6:8]}"
+            existing_titles = {
+                t
+                for (t,) in db.query(Announcement.title).filter(
+                    Announcement.stock_id == stock.id
                 )
-                if not period:
+            }
+            for item in mock:
+                title = item["title"]
+                if title in existing_titles:
                     continue
-
-                if db.query(Financial).filter(
-                    Financial.stock_id == stock.id,
-                    Financial.report_period == period,
-                ).first():
-                    continue
-
-                revenue = DataFetcher._get_sina_value(df, col, "营业收入")
-                net_profit = DataFetcher._get_sina_value(df, col, "净利润")
-
-                if revenue is None and net_profit is None:
-                    continue
-
-                fin = Financial(
-                    stock_id=stock.id,
-                    report_period=period,
-                    report_type="Y" if period.endswith("Q4") else "Q",
-                    revenue=revenue,
-                    net_profit=net_profit,
+                db.add(
+                    Announcement(
+                        stock_id=stock.id,
+                        title=title,
+                        publish_date=item["publish_date"],
+                        url=item.get("url", ""),
+                    )
                 )
-                db.add(fin)
+                existing_titles.add(title)
                 count += 1
-
-            db.commit()
-            logger.info(f"{stock.code} 备选方案同步完成")
-        except Exception as e:
+            if count > 0:
+                db.commit()
+                logger.info("%s 模拟公告生成完成，新增 %s 条", stock.code, count)
+        except Exception as e:  # noqa: BLE001
             db.rollback()
-            logger.error(f"备选方案也失败 {stock.code}: {e}")
+            logger.error("生成模拟公告失败 %s: %s", stock.code, e)
+
+    @staticmethod
+    def _parse_date(date_str: str) -> Optional[date]:
+        """解析公告日期，兼容多种格式"""
+        if not date_str:
+            return None
+        text = date_str.strip()[:10]
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d"):
+            try:
+                return datetime.strptime(text, fmt).date()
+            except ValueError:
+                continue
+        return None
