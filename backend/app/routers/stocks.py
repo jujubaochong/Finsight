@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.stock import Stock, Watchlist
+from app.cache import cache
 from app.schemas.stock import (
     StockBrief,
     StockSearchResponse,
@@ -84,6 +85,10 @@ async def refresh_stock_data(code: str, db: Session = Depends(get_db)):
     stock = db.query(Stock).filter(Stock.code == code).first()
     if not stock:
         raise HTTPException(status_code=404, detail=f"股票 {code} 不存在")
+    # 失效缓存，确保拉取最新数据
+    cache.delete(f"fin_synced:{code}")
+    cache.delete(f"ann_synced:{code}")
+    cache.delete("notice_pool")
     # 重新拉取
     DataFetcher._sync_financials(db, stock)
     DataFetcher._sync_announcements(db, stock)

@@ -5,7 +5,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useStockData } from '../hooks/useStockData'
-import { addToWatchlist, removeFromWatchlist, generateReport, getWatchlist } from '../services/api'
+import { addToWatchlist, removeFromWatchlist, generateReport, getWatchlist, refreshStockData } from '../services/api'
 import AIAnalysis from '../components/AIAnalysis'
 import FinancialCharts from '../components/FinancialCharts'
 import IndustryComparison from '../components/IndustryComparison'
@@ -14,10 +14,11 @@ import SearchBar from '../components/SearchBar'
 export default function StockDetailPage() {
   const { code } = useParams<{ code: string }>()
   const navigate = useNavigate()
-  const { data, loading, error } = useStockData(code)
+  const { data, loading, error, refetch } = useStockData(code)
   const [inWatchlist, setInWatchlist] = useState(false)
   const [generating, setGenerating] = useState(false)
   const [watchlistLoading, setWatchlistLoading] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
 
   // 检查是否已在自选
   useEffect(() => {
@@ -111,6 +112,18 @@ export default function StockDetailPage() {
     }
   }
 
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    try {
+      await refreshStockData(data.code)
+      await refetch()
+    } catch {
+      alert('数据刷新失败，请稍后重试')
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* 顶部搜索（方便切换股票） */}
@@ -146,6 +159,15 @@ export default function StockDetailPage() {
             </div>
           </div>
           <div className="flex gap-2">
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing}
+              title="重新拉取最新财务与公告数据"
+              className="px-4 py-2 text-sm rounded-lg border border-gray-300 text-gray-600
+                         hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            >
+              {refreshing ? '⟳ 刷新中...' : '⟳ 刷新数据'}
+            </button>
             <button
               onClick={handleToggleWatchlist}
               disabled={watchlistLoading}

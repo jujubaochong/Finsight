@@ -180,6 +180,81 @@ class DataFetcher:
             return "BJ"
         return "SZ"
 
+    # ========== 行业分类 ==========
+
+    @staticmethod
+    def _sync_industries(db: Session, force: bool = False) -> int:
+        """同步申万一级行业分类到 Stock.industry
+
+        采用「申万一级行业列表 + 各行业成分股」构建 code→行业 映射后批量写入。
+        申万一级共 31 个行业、覆盖全部 A 股，是标准且稳定的分类口径。
+        （东方财富个股接口在部分环境会被限流，故不逐只查询。）
+        """
+        if not force and cache.get("industries_synced"):
+            logger.debug("行业分类近期已同步，跳过")
+            return 0
+
+        try:
+            industry_df = _retry_akshare(ak.sw_index_first_info)
+        except Exception as e:  # noqa: BLE001
+            logger.error("获取申万一级行业列表失败: %s", e)
+            return 0
+
+        if industry_df is None or industry_df.empty:
+            logger.warning("申万一级行业列表为空")
+            return 0
+
+        # code（去掉 .SI 后缀）→ 行业名称
+        code_to_industry: dict[str, str] = {}
+        for _, row in industry_df.iterrows():
+            sw_code = str(row.get("行业代码", "")).split(".")[0].strip()
+            industry_name = str(row.get("行业名称", "")).strip()
+            if not sw_code or not industry_name:
+                continue
+            try:
+                cons = _retry_akshare(
+                    ak.index_component_sw, symbol=sw_code, retries=2
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("获取行业 %s(%s) 成分股失败: %s", industry_name, sw_code, e)
+                continue
+            if cons is None or cons.empty or "证券代码" not in cons.columns:
+                continue
+            for code in cons["证券代码"].astype(str):
+                code = code.strip()
+                if len(code) == 6 and code.isdigit():
+                    code_to_industry[code] = industry_name
+
+        if not code_to_industry:
+            logger.warning("未能构建任何行业映射")
+            return 0
+
+        # 批量更新数据库
+        updated = 0
+        try:
+            stocks = (
+                db.query(Stock)
+                .filter(Stock.code.in_(list(code_to_industry.keys())))
+                .all()
+            )
+            for stock in stocks:
+                new_industry = code_to_industry.get(stock.code)
+                if new_industry and stock.industry != new_industry:
+                    stock.industry = new_industry
+                    updated += 1
+            db.commit()
+            cache.set("industries_synced", True, settings.cache_ttl_industry)
+            logger.info(
+                "行业分类同步完成：映射 %s 只，更新 %s 只",
+                len(code_to_industry),
+                updated,
+            )
+        except Exception as e:  # noqa: BLE001
+            db.rollback()
+            logger.error("写入行业分类失败: %s", e)
+        return updated
+
+
     # ========== 股票详情 ==========
 
     @staticmethod
