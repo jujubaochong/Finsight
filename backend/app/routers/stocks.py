@@ -25,8 +25,8 @@ router = APIRouter()
 
 
 @router.get("/search", response_model=StockSearchResponse)
-async def search_stocks(q: str, db: Session = Depends(get_db)):
-    """模糊搜索股票"""
+def search_stocks(q: str, db: Session = Depends(get_db)):
+    """模糊搜索股票（纯数据库查询，支持代码/名称/拼音/首字母）"""
     results = DataFetcher.search_stock(db, q)
     return StockSearchResponse(
         query=q,
@@ -36,7 +36,7 @@ async def search_stocks(q: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{code}")
-async def get_stock_detail(code: str, db: Session = Depends(get_db)):
+def get_stock_detail(code: str, db: Session = Depends(get_db)):
     """获取股票详情（含财务数据 + 公告 + AI快速分析）"""
     info = DataFetcher.get_stock_detail(db, code)
     if not info:
@@ -80,7 +80,7 @@ async def get_stock_detail(code: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{code}/refresh")
-async def refresh_stock_data(code: str, db: Session = Depends(get_db)):
+def refresh_stock_data(code: str, db: Session = Depends(get_db)):
     """强制刷新某只股票的数据"""
     stock = db.query(Stock).filter(Stock.code == code).first()
     if not stock:
@@ -98,7 +98,7 @@ async def refresh_stock_data(code: str, db: Session = Depends(get_db)):
 # ====== 自选股 ======
 
 @router.get("/watchlist/list")
-async def get_watchlist(user_id: str = "default", db: Session = Depends(get_db)):
+def get_watchlist(user_id: str = "default", db: Session = Depends(get_db)):
     """获取自选股列表"""
     items = (
         db.query(Watchlist)
@@ -126,7 +126,7 @@ async def get_watchlist(user_id: str = "default", db: Session = Depends(get_db))
 
 
 @router.post("/watchlist/add")
-async def add_to_watchlist(req: WatchlistAddRequest, user_id: str = "default", db: Session = Depends(get_db)):
+def add_to_watchlist(req: WatchlistAddRequest, user_id: str = "default", db: Session = Depends(get_db)):
     """添加自选股"""
     stock = db.query(Stock).filter(Stock.code == req.code).first()
     if not stock:
@@ -151,7 +151,7 @@ async def add_to_watchlist(req: WatchlistAddRequest, user_id: str = "default", d
 
 
 @router.delete("/watchlist/{code}")
-async def remove_from_watchlist(code: str, user_id: str = "default", db: Session = Depends(get_db)):
+def remove_from_watchlist(code: str, user_id: str = "default", db: Session = Depends(get_db)):
     """删除自选股"""
     stock = db.query(Stock).filter(Stock.code == code).first()
     if not stock:

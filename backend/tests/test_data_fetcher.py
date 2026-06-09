@@ -211,3 +211,31 @@ class TestSearch:
         results = DataFetcher.search_stock(db, "平安")
         assert len(results) == 1
         assert results[0]["code"] == "000001"
+        # 同步时应写入拼音字段
+        s = db.query(Stock).filter(Stock.code == "000001").first()
+        assert s.name_pinyin == "pinganyinhang"
+        assert s.name_initials == "payh"
+
+    def test_search_by_pinyin_and_initials(self, db, monkeypatch):
+        from app.services.data_fetcher import _pinyin_of
+
+        py, ini = _pinyin_of("平安银行")
+        db.add(Stock(code="000001", name="平安银行", market="SZ",
+                     name_pinyin=py, name_initials=ini))
+        db.commit()
+
+        def boom():
+            raise AssertionError("库非空时不应联网同步")
+
+        monkeypatch.setattr(df_module.ak, "stock_info_a_code_name", boom)
+        assert DataFetcher.search_stock(db, "pingan")[0]["code"] == "000001"
+        assert DataFetcher.search_stock(db, "payh")[0]["code"] == "000001"
+        assert DataFetcher.search_stock(db, "PAYH")[0]["code"] == "000001"  # 大小写不敏感
+
+    def test_search_miss_no_sync_when_db_nonempty(self, db, sample_stock, monkeypatch):
+        """库非空但关键词无匹配时，绝不触发网络同步。"""
+        def boom():
+            raise AssertionError("库非空时不应联网同步")
+
+        monkeypatch.setattr(df_module.ak, "stock_info_a_code_name", boom)
+        assert DataFetcher.search_stock(db, "不存在的票") == []

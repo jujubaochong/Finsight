@@ -87,6 +87,25 @@ def _to_yi(val) -> Optional[float]:
     return round(num / 1e8, 4)
 
 
+def _pinyin_of(name: str) -> tuple[str, str]:
+    """把股票名称转成 (全拼, 首字母)，均为小写。用于拼音/首字母搜索。
+
+    例：'平安银行' -> ('pinganyinhang', 'payh')
+    pypinyin 不可用时降级为空串，不影响主流程。
+    """
+    cleaned = (name or "").replace(" ", "")
+    if not cleaned:
+        return "", ""
+    try:
+        from pypinyin import Style, lazy_pinyin
+
+        full = "".join(lazy_pinyin(cleaned)).lower()
+        initials = "".join(lazy_pinyin(cleaned, style=Style.FIRST_LETTER)).lower()
+        return full, initials
+    except Exception:  # noqa: BLE001 - pypinyin 缺失/异常时不影响搜索主流程
+        return "", ""
+
+
 class DataFetcher:
     """从 AkShare 拉取 A 股数据并存入数据库"""
 
@@ -94,29 +113,53 @@ class DataFetcher:
 
     @staticmethod
     def search_stock(db: Session, keyword: str) -> list[dict]:
-        """模糊搜索股票（优先数据库，未命中再同步列表）"""
+        """模糊搜索股票
+
+        性能要点：搜索请求**只查本地数据库**，绝不在请求链路里发起网络同步。
+        股票列表由启动时的后台任务预先填充（见 ``ensure_stock_list`` /
+        ``background_tasks``）。仅当数据库完全为空（冷启动且后台任务尚未完成）时，
+        才退化为一次性同步，避免首个用户面对永久空结果。
+        """
         if not keyword or not keyword.strip():
             return []
 
         keyword = keyword.strip()
+        cache_key = f"search:{keyword.lower()}"
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
 
         results = DataFetcher._query_stocks(db, keyword)
-        if results:
-            return results
 
-        # 数据库没有 → 同步股票列表后重新搜索
-        logger.info("数据库未命中关键词 '%s'，尝试同步股票列表", keyword)
-        DataFetcher._sync_stock_list(db)
-        return DataFetcher._query_stocks(db, keyword)
+        if not results and db.query(Stock.id).first() is None:
+            # 数据库尚未填充（冷启动兜底）：同步一次后重查
+            logger.info("股票库为空，触发一次性同步")
+            DataFetcher._sync_stock_list(db)
+            results = DataFetcher._query_stocks(db, keyword)
+
+        if results:
+            # 仅缓存非空结果，避免在库填充前把空结果缓存住
+            cache.set(cache_key, results, 600)
+        return results
 
     @staticmethod
     def _query_stocks(db: Session, keyword: str) -> list[dict]:
+        """纯数据库查询：支持代码、中文名、拼音全拼、拼音首字母。"""
+        kw = keyword.strip()
+        kw_lower = kw.lower()
+
+        conditions = [Stock.code.contains(kw), Stock.name.contains(kw)]
+        # ASCII 关键词（拼音/字母/数字）才匹配拼音列，并用前缀匹配以命中索引
+        if kw.isascii():
+            conditions.append(Stock.name_pinyin.like(f"{kw_lower}%"))
+            conditions.append(Stock.name_initials.like(f"{kw_lower}%"))
+
+        from sqlalchemy import or_
+
         rows = (
             db.query(Stock)
-            .filter(
-                Stock.is_active.is_(True),
-                (Stock.code.contains(keyword) | Stock.name.contains(keyword)),
-            )
+            .filter(Stock.is_active.is_(True), or_(*conditions))
+            .order_by(Stock.code)
             .limit(10)
             .all()
         )
@@ -129,6 +172,35 @@ class DataFetcher:
             }
             for s in rows
         ]
+
+    @staticmethod
+    def ensure_stock_list(db: Session) -> int:
+        """确保股票列表已填充（供启动/后台任务调用）。返回当前库中股票数量。"""
+        count = db.query(Stock.id).count()
+        if count == 0:
+            DataFetcher._sync_stock_list(db)
+            count = db.query(Stock.id).count()
+        else:
+            # 已有数据但可能缺拼音（老库升级），补齐
+            DataFetcher._backfill_pinyin(db)
+        return count
+
+    @staticmethod
+    def _backfill_pinyin(db: Session, batch: int = 2000) -> int:
+        """为缺失拼音字段的存量股票补齐拼音（一次性、幂等）。"""
+        rows = (
+            db.query(Stock)
+            .filter(Stock.name_pinyin.is_(None))
+            .limit(batch)
+            .all()
+        )
+        if not rows:
+            return 0
+        for s in rows:
+            s.name_pinyin, s.name_initials = _pinyin_of(s.name)
+        db.commit()
+        logger.info("补齐拼音字段 %s 条", len(rows))
+        return len(rows)
 
     @staticmethod
     def _sync_stock_list(db: Session):
@@ -153,10 +225,13 @@ class DataFetcher:
                     continue
                 if code in existing_codes:
                     continue
+                pinyin, initials = _pinyin_of(name)
                 db.add(
                     Stock(
                         code=code,
                         name=name,
+                        name_pinyin=pinyin,
+                        name_initials=initials,
                         market=DataFetcher._guess_market(code),
                     )
                 )

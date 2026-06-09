@@ -21,6 +21,9 @@ python-multipart==0.*
 # 数据源
 akshare>=1.15.0
 
+# 拼音搜索（股票名称转拼音/首字母）
+pypinyin>=0.51.0
+
 # AI (DeepSeek 兼容 OpenAI SDK)
 openai>=1.68.0
 
