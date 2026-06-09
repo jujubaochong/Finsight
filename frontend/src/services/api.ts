@@ -24,6 +24,11 @@ export async function getStockDetail(code: string): Promise<StockDetail> {
   return data
 }
 
+export async function refreshStockData(code: string): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.post(`/stocks/${code}/refresh`)
+  return data
+}
+
 // ====== AI 分析相关 ======
 
 export async function quickAnalysis(code: string): Promise<{ code: string; analysis: QuickAnalysisResult }> {
