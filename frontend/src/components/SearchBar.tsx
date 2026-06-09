@@ -38,21 +38,31 @@ export default function SearchBar({
       return
     }
 
+    // 用 AbortController 取消过期请求，并忽略过期响应，避免结果错乱
+    let active = true
+    const controller = new AbortController()
+
     const fetchSuggestions = async () => {
       setLoading(true)
       try {
-        const res = await searchStocks(debouncedQuery)
+        const res = await searchStocks(debouncedQuery, controller.signal)
+        if (!active) return
         setSuggestions(res.results.slice(0, 6))
         setShowDropdown(res.results.length > 0)
         setActiveIndex(-1)
       } catch {
-        setSuggestions([])
+        if (active) setSuggestions([])
       } finally {
-        setLoading(false)
+        if (active) setLoading(false)
       }
     }
 
     fetchSuggestions()
+
+    return () => {
+      active = false
+      controller.abort()
+    }
   }, [debouncedQuery])
 
   // 键盘导航
