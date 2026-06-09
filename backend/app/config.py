@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     cache_ttl_stock_list: int = 86400  # 股票列表缓存 24 小时
     cache_ttl_financials: int = 43200  # 财务数据缓存 12 小时
     cache_ttl_analysis: int = 3600  # AI 分析缓存 1 小时
+    cache_ttl_industry: int = 604800  # 行业分类缓存 7 天
 
     # AI 调用限制
     ai_max_retries: int = 3
