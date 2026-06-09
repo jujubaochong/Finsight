@@ -20,7 +20,7 @@ router = APIRouter()
 
 
 @router.post("/generate/{code}", response_model=ReportGenerateResponse)
-async def generate_report(
+def generate_report(
     code: str,
     req: ReportGenerateRequest = ReportGenerateRequest(),
     user_id: str = "default",
@@ -35,7 +35,7 @@ async def generate_report(
 
 
 @router.get("/status/{task_id}", response_model=ReportStatusResponse)
-async def get_report_status(task_id: str, db: Session = Depends(get_db)):
+def get_report_status(task_id: str, db: Session = Depends(get_db)):
     """查询报告生成状态（支持实时进度）"""
     try:
         report_id = int(task_id)
@@ -69,7 +69,7 @@ async def get_report_status(task_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/list")
-async def list_reports(user_id: str = "default", db: Session = Depends(get_db)):
+def list_reports(user_id: str = "default", db: Session = Depends(get_db)):
     """获取用户的报告列表"""
     reports = ReportGenerator.get_all_reports(db, user_id)
     return [
@@ -85,7 +85,7 @@ async def list_reports(user_id: str = "default", db: Session = Depends(get_db)):
 
 
 @router.get("/{report_id}")
-async def get_report(report_id: int, db: Session = Depends(get_db)):
+def get_report(report_id: int, db: Session = Depends(get_db)):
     """获取报告内容"""
     report = ReportGenerator.get_report(db, report_id)
     if not report:
@@ -102,7 +102,7 @@ async def get_report(report_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/{report_id}/export")
-async def export_report(
+def export_report(
     report_id: int, format: str = "markdown", db: Session = Depends(get_db)
 ):
     """导出报告"""
@@ -127,7 +127,7 @@ async def export_report(
 
 
 @router.delete("/{report_id}")
-async def delete_report(report_id: int, db: Session = Depends(get_db)):
+def delete_report(report_id: int, db: Session = Depends(get_db)):
     """删除报告"""
     report = ReportGenerator.get_report(db, report_id)
     if not report:
