@@ -95,7 +95,14 @@ export default function FinancialCharts({ financials }: Props) {
     <div className="bg-white rounded-xl border border-gray-200 p-6">
       {/* 头部：标题 + 视图切换 */}
       <div className="flex items-center justify-between mb-5 flex-wrap gap-2">
-        <h2 className="font-semibold text-gray-800">📊 财务数据</h2>
+        <h2 className="font-semibold text-gray-800 flex items-center gap-2">
+          📊 财务数据
+          {latest && (
+            <span className="text-xs font-normal text-gray-400">
+              数据截至 {latest.report_period}
+            </span>
+          )}
+        </h2>
         <div className="flex gap-1.5">
           <button
             onClick={() => setViewMode('quarterly')}
@@ -133,13 +140,14 @@ export default function FinancialCharts({ financials }: Props) {
 
       {/* 核心指标卡片 */}
       {latest && (
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 mb-6">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-6">
           {[
             { label: '营业收入', value: latest.revenue, unit: '亿', color: 'blue' },
             { label: '净利润', value: latest.net_profit, unit: '亿', color: 'emerald' },
             { label: '净利率', value: latest.net_margin, unit: '%', color: 'purple' },
             { label: 'ROE', value: latest.roe, unit: '%', color: 'amber' },
             { label: '资产负债率', value: latest.debt_ratio, unit: '%', color: 'red' },
+            { label: '每股收益', value: latest.eps, unit: '元', color: 'cyan' },
           ].map((item) => (
             <div key={item.label} className="bg-gray-50 rounded-lg p-3">
               <div className="text-xs text-gray-500 mb-1">{item.label}</div>

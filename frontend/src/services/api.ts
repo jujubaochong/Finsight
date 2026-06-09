@@ -14,13 +14,23 @@ const api = axios.create({
 
 // ====== 股票相关 ======
 
-export async function searchStocks(query: string): Promise<SearchResponse> {
-  const { data } = await api.get('/stocks/search', { params: { q: query } })
+export async function searchStocks(query: string, signal?: AbortSignal): Promise<SearchResponse> {
+  // 搜索单独设较短超时，避免请求长时间挂起；支持取消过期请求
+  const { data } = await api.get('/stocks/search', {
+    params: { q: query },
+    signal,
+    timeout: 8000,
+  })
   return data
 }
 
 export async function getStockDetail(code: string): Promise<StockDetail> {
   const { data } = await api.get(`/stocks/${code}`)
+  return data
+}
+
+export async function refreshStockData(code: string): Promise<{ success: boolean; message: string }> {
+  const { data } = await api.post(`/stocks/${code}/refresh`)
   return data
 }
 

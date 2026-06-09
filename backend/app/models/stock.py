@@ -18,7 +18,9 @@ class Stock(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(10), unique=True, index=True, comment="股票代码，如 000001")
-    name: Mapped[str] = mapped_column(String(50), comment="股票名称")
+    name: Mapped[str] = mapped_column(String(50), index=True, comment="股票名称")
+    name_pinyin: Mapped[Optional[str]] = mapped_column(String(120), index=True, comment="名称全拼（小写），用于拼音搜索")
+    name_initials: Mapped[Optional[str]] = mapped_column(String(40), index=True, comment="名称拼音首字母（小写），用于快速检索")
     market: Mapped[str] = mapped_column(String(4), comment="市场: SZ/SH/BJ")
     industry: Mapped[Optional[str]] = mapped_column(String(50), comment="申万一级行业")
     listing_date: Mapped[Optional[date]] = mapped_column(Date, comment="上市日期")
