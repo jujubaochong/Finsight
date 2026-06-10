@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from app.database import engine
@@ -78,12 +79,17 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
         "http://localhost:5173",
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 响应 GZip 压缩（财务/报告等较大 JSON 传输更快）
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 # 全局异常处理
@@ -110,7 +116,7 @@ async def health():
 
 
 @app.get("/api/stats")
-async def stats():
+def stats():
     """简易统计（开发调试用）"""
     from app.database import SessionLocal
     from app.models.stock import Stock, AnalysisReport

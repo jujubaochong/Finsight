@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models.stock import Stock, Watchlist
 from app.cache import cache
+from app.config import settings
 from app.schemas.stock import (
     StockBrief,
     StockSearchResponse,
@@ -59,10 +60,15 @@ def get_stock_detail(code: str, db: Session = Depends(get_db)):
         for a in (stock.announcements or [])[:20]
     ]
 
-    # AI 快速分析
+    # AI 快速分析（带缓存：LLM 调用昂贵且较慢，命中缓存可秒开）
     quick = None
     try:
-        quick = ReportGenerator.generate_quick_analysis(db, code)
+        qa_key = f"quick_analysis:{code}"
+        quick = cache.get(qa_key)
+        if quick is None:
+            quick = ReportGenerator.generate_quick_analysis(db, code)
+            if quick is not None:
+                cache.set(qa_key, quick, settings.cache_ttl_analysis)
     except Exception:
         pass  # AI 不可用时静默降级
 
@@ -88,6 +94,7 @@ def refresh_stock_data(code: str, db: Session = Depends(get_db)):
     # 失效缓存，确保拉取最新数据
     cache.delete(f"fin_synced:{code}")
     cache.delete(f"ann_synced:{code}")
+    cache.delete(f"quick_analysis:{code}")
     cache.delete("notice_pool")
     # 重新拉取
     DataFetcher._sync_financials(db, stock)
