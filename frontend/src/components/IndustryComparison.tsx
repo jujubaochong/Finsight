@@ -30,18 +30,38 @@ export default function IndustryComparison({ code }: Props) {
 
   useEffect(() => {
     if (!code) return
-    setLoading(true)
-    setError(null)
-    getIndustryComparison(code)
-      .then((result) => {
-        if (result.error && !result.target_metrics) {
-          setError(result.error)
-        } else {
-          setData(result)
-        }
-      })
-      .catch((e) => setError(e.response?.data?.detail || '获取行业对标数据失败'))
-      .finally(() => setLoading(false))
+    let cancelled = false
+    let retryTimer: ReturnType<typeof setTimeout> | undefined
+
+    const load = (isRetry = false) => {
+      if (!isRetry) setLoading(true)
+      setError(null)
+      getIndustryComparison(code)
+        .then((result) => {
+          if (cancelled) return
+          if (result.error && !result.target_metrics) {
+            setError(result.error)
+          } else {
+            setData(result)
+            // 后端仍在后台补齐同行数据 → 稍后自动重试一次，拿到完整对标
+            if (result.pending) {
+              retryTimer = setTimeout(() => load(true), 8000)
+            }
+          }
+        })
+        .catch((e) => {
+          if (!cancelled) setError(e.response?.data?.detail || '获取行业对标数据失败')
+        })
+        .finally(() => {
+          if (!cancelled) setLoading(false)
+        })
+    }
+
+    load()
+    return () => {
+      cancelled = true
+      if (retryTimer) clearTimeout(retryTimer)
+    }
   }, [code])
 
   if (loading) {
@@ -65,6 +85,22 @@ export default function IndustryComparison({ code }: Props) {
   }
 
   if (!data) return null
+
+  // 后台正在补齐同行数据：展示提示 + 已有的目标指标，避免空白
+  if (data.pending) {
+    return (
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2">
+          🏭 行业对标
+          <span className="text-sm font-normal text-gray-400">{data.industry}</span>
+        </h2>
+        <div className="flex items-center gap-3 text-sm text-gray-500 bg-amber-50 border border-amber-100 rounded-lg p-4">
+          <div className="animate-spin rounded-full h-4 w-4 border-2 border-amber-300 border-t-amber-500 shrink-0" />
+          <span>{data.message || '同行业财务数据正在后台准备，稍后将自动更新…'}</span>
+        </div>
+      </div>
+    )
+  }
 
   const { target_metrics, industry_stats, rankings, top_peers } = data
 

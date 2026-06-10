@@ -144,4 +144,6 @@ export interface IndustryComparison {
   peer_count: number
   top_peers: IndustryPeer[]
   error?: string
+  pending?: boolean
+  message?: string
 }
