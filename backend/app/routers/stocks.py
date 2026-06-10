@@ -25,8 +25,12 @@ router = APIRouter()
 
 
 @router.get("/search", response_model=StockSearchResponse)
-async def search_stocks(q: str, db: Session = Depends(get_db)):
-    """模糊搜索股票"""
+def search_stocks(q: str, db: Session = Depends(get_db)):
+    """模糊搜索股票
+
+    定义为同步 ``def``：FastAPI 会在工作线程池中执行，避免（即便很快的）
+    数据库查询阻塞事件循环。搜索本身只查数据库，不会触发慢速网络下载。
+    """
     results = DataFetcher.search_stock(db, q)
     return StockSearchResponse(
         query=q,

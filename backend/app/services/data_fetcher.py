@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -35,6 +36,10 @@ _MAX_RETRIES = 3
 _MAX_PERIODS = 8
 # 公告池回溯的交易日天数
 _NOTICE_LOOKBACK_DAYS = 5
+
+# 后台股票列表同步的并发保护（避免短时间内启动多个同步线程）
+_stock_list_sync_lock = threading.Lock()
+_stock_list_sync_in_progress = False
 
 
 def _retry_akshare(func, *args, retries: int = _MAX_RETRIES, **kwargs):
@@ -94,7 +99,12 @@ class DataFetcher:
 
     @staticmethod
     def search_stock(db: Session, keyword: str) -> list[dict]:
-        """模糊搜索股票（优先数据库，未命中再同步列表）"""
+        """模糊搜索股票（只查数据库，绝不在请求路径上做慢速网络下载）
+
+        关键改动：数据库未命中时**不再同步阻塞地**去 akshare 拉取整张股票列表
+        （那会拖到前端 60s 超时，并阻塞整个事件循环）。改为在后台线程异步触发
+        列表同步，本次请求立即返回当前结果；列表同步完成后，后续搜索即可命中。
+        """
         if not keyword or not keyword.strip():
             return []
 
@@ -104,10 +114,46 @@ class DataFetcher:
         if results:
             return results
 
-        # 数据库没有 → 同步股票列表后重新搜索
-        logger.info("数据库未命中关键词 '%s'，尝试同步股票列表", keyword)
-        DataFetcher._sync_stock_list(db)
-        return DataFetcher._query_stocks(db, keyword)
+        # 数据库未命中 → 触发后台异步同步（不阻塞本次请求），立即返回当前结果
+        logger.info("数据库未命中关键词 '%s'，已触发后台同步股票列表", keyword)
+        DataFetcher._trigger_stock_list_sync_async()
+        return results
+
+    @staticmethod
+    def _trigger_stock_list_sync_async() -> None:
+        """在后台线程异步同步 A 股股票列表，避免阻塞搜索请求与事件循环。
+
+        通过模块级锁 + 标志位保证同一时刻最多只有一个同步线程在跑，
+        重复触发会被直接忽略。
+        """
+        global _stock_list_sync_in_progress
+
+        # 近期已同步则无需再触发
+        if cache.get("stock_list_synced"):
+            return
+
+        with _stock_list_sync_lock:
+            if _stock_list_sync_in_progress:
+                return
+            _stock_list_sync_in_progress = True
+
+        def _worker() -> None:
+            global _stock_list_sync_in_progress
+            from app.database import SessionLocal
+
+            worker_db = SessionLocal()
+            try:
+                DataFetcher._sync_stock_list(worker_db)
+            except Exception as e:  # noqa: BLE001
+                logger.error("后台同步股票列表失败: %s", e)
+            finally:
+                worker_db.close()
+                with _stock_list_sync_lock:
+                    _stock_list_sync_in_progress = False
+
+        threading.Thread(
+            target=_worker, name="stock-list-sync", daemon=True
+        ).start()
 
     @staticmethod
     def _query_stocks(db: Session, keyword: str) -> list[dict]:
