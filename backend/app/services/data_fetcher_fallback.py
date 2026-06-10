@@ -146,10 +146,12 @@ class DataFetcherFallback:
             publish_date = base_date - timedelta(days=30 * i)
             title = announcement_templates[i]
             
+            # 模拟公告没有真实原文，URL 留空：前端在 url 为空时不会渲染"原文"链接，
+            # 避免点开后跳到无效的 example.com 占位页面。
             announcements.append({
                 "title": title,
                 "publish_date": publish_date,
-                "url": f"http://example.com/announcement/{stock_code}/{i+1}",
+                "url": "",
             })
         
         return announcements
