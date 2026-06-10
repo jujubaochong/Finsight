@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import math
+import concurrent.futures
 import threading
 import time
 from datetime import date, datetime, timedelta
@@ -32,23 +33,58 @@ logger = logging.getLogger(__name__)
 _API_SLEEP = 0.6
 # 最大重试次数
 _MAX_RETRIES = 3
+# 单次 AkShare 调用的最长等待时间（秒）——超时即视为失败并重试/降级，
+# 避免 akshare 内部无超时的网络请求把整个接口（乃至事件循环）拖死。
+_AKSHARE_CALL_TIMEOUT = 12
+# 公告池抓取的总时间预算（秒），避免详情页/刷新长时间阻塞
+_NOTICE_FETCH_BUDGET = 25
 # 每只股票最多保留的财务报告期数
 _MAX_PERIODS = 8
 # 公告池回溯的交易日天数
-_NOTICE_LOOKBACK_DAYS = 5
+_NOTICE_LOOKBACK_DAYS = 3
 
 # 后台股票列表同步的并发保护（避免短时间内启动多个同步线程）
 _stock_list_sync_lock = threading.Lock()
 _stock_list_sync_in_progress = False
 
+# 专用于执行 akshare 阻塞调用的线程池（配合 future.result(timeout) 实现单次调用超时）
+_akshare_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="akshare"
+)
 
-def _retry_akshare(func, *args, retries: int = _MAX_RETRIES, **kwargs):
-    """带重试 + 指数退避的 AkShare 调用"""
+
+def _retry_akshare(
+    func,
+    *args,
+    retries: int = _MAX_RETRIES,
+    timeout: float = _AKSHARE_CALL_TIMEOUT,
+    **kwargs,
+):
+    """带重试 + 指数退避 + 单次超时的 AkShare 调用
+
+    akshare 底层的网络请求大多没有设置超时，一旦数据源无响应就会无限挂起。
+    这里用线程池 + ``future.result(timeout)`` 给每次调用加一个硬上限：超时即
+    当作失败处理，触发重试，最终交由上层降级到模拟数据。
+    """
     last_exc: Exception | None = None
     for attempt in range(retries):
+        time.sleep(_API_SLEEP)
+        future = _akshare_executor.submit(func, *args, **kwargs)
         try:
-            time.sleep(_API_SLEEP)
-            return func(*args, **kwargs)
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            last_exc = TimeoutError(
+                f"AkShare 调用超时（>{timeout}s）: "
+                f"{getattr(func, '__name__', str(func))}"
+            )
+            future.cancel()
+            logger.warning(
+                "AkShare 调用超时 (attempt %s/%s): %s (>%ss)",
+                attempt + 1,
+                retries,
+                getattr(func, "__name__", str(func)),
+                timeout,
+            )
         except Exception as e:  # noqa: BLE001 - akshare 抛出的异常类型不固定
             last_exc = e
             logger.warning(
@@ -58,8 +94,8 @@ def _retry_akshare(func, *args, retries: int = _MAX_RETRIES, **kwargs):
                 getattr(func, "__name__", str(func)),
                 e,
             )
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)  # 指数退避
+        if attempt < retries - 1:
+            time.sleep(2 ** attempt)  # 指数退避
     if last_exc is not None:
         raise last_exc
     return None
@@ -614,8 +650,13 @@ class DataFetcher:
         today = db_today or date.today()
         collected_days = 0
         offset = 0
+        start_ts = time.monotonic()
         # 最多向前找 14 个自然日，凑够 _NOTICE_LOOKBACK_DAYS 个有数据的交易日
         while collected_days < _NOTICE_LOOKBACK_DAYS and offset < 14:
+            # 总时间预算保护：避免逐天拉取把详情页/刷新拖到前端超时
+            if time.monotonic() - start_ts > _NOTICE_FETCH_BUDGET:
+                logger.warning("公告池抓取超出时间预算（%ss），提前结束", _NOTICE_FETCH_BUDGET)
+                break
             day = today - timedelta(days=offset)
             offset += 1
             if day.weekday() >= 5:  # 跳过周末

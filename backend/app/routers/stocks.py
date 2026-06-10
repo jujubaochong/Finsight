@@ -40,8 +40,12 @@ def search_stocks(q: str, db: Session = Depends(get_db)):
 
 
 @router.get("/{code}")
-async def get_stock_detail(code: str, db: Session = Depends(get_db)):
-    """获取股票详情（含财务数据 + 公告 + AI快速分析）"""
+def get_stock_detail(code: str, db: Session = Depends(get_db)):
+    """获取股票详情（含财务数据 + 公告 + AI快速分析）
+
+    定义为同步 ``def``：详情会触发 akshare 财务/公告同步与 AI 调用等阻塞操作，
+    交给 FastAPI 线程池执行，避免阻塞事件循环（否则会把同时进行的搜索也卡死）。
+    """
     info = DataFetcher.get_stock_detail(db, code)
     if not info:
         raise HTTPException(status_code=404, detail=f"股票 {code} 不存在")
@@ -84,8 +88,13 @@ async def get_stock_detail(code: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{code}/refresh")
-async def refresh_stock_data(code: str, db: Session = Depends(get_db)):
-    """强制刷新某只股票的数据"""
+def refresh_stock_data(code: str, db: Session = Depends(get_db)):
+    """强制刷新某只股票的数据
+
+    同步 ``def``：刷新会逐项重新拉取 akshare 财务与公告数据（阻塞），由线程池执行，
+    避免阻塞事件循环。配合 data_fetcher 中的单次调用超时与公告抓取时间预算，
+    刷新会在有限时间内返回（即使部分数据源不可用也会降级而非卡死）。
+    """
     stock = db.query(Stock).filter(Stock.code == code).first()
     if not stock:
         raise HTTPException(status_code=404, detail=f"股票 {code} 不存在")

@@ -26,18 +26,28 @@ class DataFetcherFallback:
         
         # 基于股票代码和名称生成一些合理的模拟数据
         financials = []
-        base_year = datetime.now().year - 1
-        
-        # 生成最近4个季度的数据
-        for i in range(4):
-            year = base_year
-            quarter = 4 - i
-            
-            # 调整年份和季度
-            if quarter <= 0:
-                year -= 1
-                quarter = 4 + quarter
-            
+
+        # 计算最近一个「已结束并通常已披露」的报告期，从它往前回溯 4 期，
+        # 这样模拟数据的报告期会贴近当前时间（而非写死成去年）。
+        now = datetime.now()
+        current_quarter = (now.month - 1) // 3 + 1
+        year = now.year
+        quarter = current_quarter - 1  # 当前季度尚未结束，取上一个已结束季度
+        if quarter == 0:
+            year -= 1
+            quarter = 4
+
+        periods: List[tuple] = []
+        y, q = year, quarter
+        for _ in range(4):
+            periods.append((y, q))
+            q -= 1
+            if q == 0:
+                q = 4
+                y -= 1
+
+        # 生成最近4个季度的数据（periods[0] 为最新报告期）
+        for i, (year, quarter) in enumerate(periods):
             period = f"{year}Q{quarter}"
             
             # 根据股票类型生成不同的基础值
