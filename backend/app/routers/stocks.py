@@ -55,7 +55,7 @@ def get_stock_detail(code: str, db: Session = Depends(get_db)):
             id=a.id,
             title=a.title,
             publish_date=a.publish_date,
-            url=a.url,
+            url=(a.url or None) if (a.url or "").startswith("http") else None,
         )
         for a in (stock.announcements or [])[:20]
     ]

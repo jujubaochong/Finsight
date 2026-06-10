@@ -139,7 +139,7 @@ class DataFetcherFallback:
             announcements.append({
                 "title": title,
                 "publish_date": publish_date,
-                "url": f"http://example.com/announcement/{stock_code}/{i+1}",
+                "url": "",  # 模拟数据无真实链接，前端据此不展示"查看原文"
             })
         
         return announcements

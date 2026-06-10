@@ -239,3 +239,24 @@ class TestSearch:
 
         monkeypatch.setattr(df_module.ak, "stock_info_a_code_name", boom)
         assert DataFetcher.search_stock(db, "不存在的票") == []
+
+
+class TestStaleness:
+    def test_empty_is_stale(self, db, sample_stock):
+        assert DataFetcher._is_financials_stale(sample_stock) is True
+
+    def test_old_period_is_stale(self, db, sample_stock):
+        db.add(Financial(stock_id=sample_stock.id, report_period="2020Q1",
+                         report_type="Q", revenue=10.0, net_profit=5.0))
+        db.commit()
+        db.refresh(sample_stock)
+        assert DataFetcher._is_financials_stale(sample_stock) is True
+
+    def test_recent_period_not_stale(self, db, sample_stock):
+        # 用"理应已披露的最新期"本身作为库中数据 → 不应判为陈旧
+        latest = DataFetcher._expected_latest_period()
+        db.add(Financial(stock_id=sample_stock.id, report_period=latest,
+                         report_type="Q", revenue=10.0, net_profit=5.0))
+        db.commit()
+        db.refresh(sample_stock)
+        assert DataFetcher._is_financials_stale(sample_stock) is False
