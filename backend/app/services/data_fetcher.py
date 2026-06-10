@@ -192,6 +192,36 @@ class DataFetcher:
         ).start()
 
     @staticmethod
+    def _trigger_announcements_sync_async(code: str) -> None:
+        """在后台线程异步同步某只股票的公告（全市场公告抓取很重，不放在请求路径上）。
+
+        用缓存键做简单防抖：2 分钟内同一只股票不重复触发；成功后写入
+        ``ann_synced:{code}`` 缓存，避免下次进入详情页再次触发。
+        """
+        if cache.get(f"ann_synced:{code}") or cache.get(f"ann_syncing:{code}"):
+            return
+        cache.set(f"ann_syncing:{code}", True, 120)
+
+        def _worker() -> None:
+            from app.database import SessionLocal
+
+            worker_db = SessionLocal()
+            try:
+                stock = worker_db.query(Stock).filter(Stock.code == code).first()
+                if stock:
+                    DataFetcher._sync_announcements(worker_db, stock)
+                    cache.set(f"ann_synced:{code}", True, settings.cache_ttl_financials)
+            except Exception as e:  # noqa: BLE001
+                logger.error("后台同步公告失败 %s: %s", code, e)
+            finally:
+                worker_db.close()
+                cache.delete(f"ann_syncing:{code}")
+
+        threading.Thread(
+            target=_worker, name=f"ann-sync-{code}", daemon=True
+        ).start()
+
+    @staticmethod
     def _query_stocks(db: Session, keyword: str) -> list[dict]:
         rows = (
             db.query(Stock)
@@ -349,17 +379,18 @@ class DataFetcher:
         if not stock:
             return None
 
-        # 按需拉取财务数据（缓存控制）
+        # 按需拉取财务数据（缓存控制）——保留同步拉取：财务是详情页核心内容，
+        # 且为单只股票的定向查询，已被单次调用超时（12s）兜底，首次后即走缓存。
         cache_key = f"fin_synced:{code}"
         if not stock.financials and not cache.get(cache_key):
             DataFetcher._sync_financials(db, stock)
             cache.set(cache_key, True, settings.cache_ttl_financials)
 
-        # 按需拉取公告
-        cache_key_ann = f"ann_synced:{code}"
-        if not stock.announcements and not cache.get(cache_key_ann):
-            DataFetcher._sync_announcements(db, stock)
-            cache.set(cache_key_ann, True, settings.cache_ttl_financials)
+        # 公告：不在请求路径上做【全市场】公告抓取（这是最重的一步），
+        # 改为后台异步同步。本次返回数据库已有公告（首次可能为空，
+        # 稍后刷新或再次进入即可见），避免拖慢首屏。
+        if not stock.announcements and not cache.get(f"ann_synced:{code}"):
+            DataFetcher._trigger_announcements_sync_async(code)
 
         db.refresh(stock)
         return {

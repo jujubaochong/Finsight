@@ -18,7 +18,6 @@ from app.schemas.stock import (
     WatchlistRemoveResponse,
 )
 from app.services.data_fetcher import DataFetcher
-from app.services.report_generator import ReportGenerator
 from app.services.alert_monitor import AlertMonitor
 
 router = APIRouter()
@@ -67,13 +66,9 @@ def get_stock_detail(code: str, db: Session = Depends(get_db)):
         for a in (stock.announcements or [])[:20]
     ]
 
-    # AI 快速分析
-    quick = None
-    try:
-        quick = ReportGenerator.generate_quick_analysis(db, code)
-    except Exception:
-        pass  # AI 不可用时静默降级
-
+    # AI 快速分析不再内联生成（它是最慢、最易失败的一环）。
+    # 前端在详情加载完成后单独调用 POST /analysis/quick/{code} 异步获取，
+    # 各自带 loading 状态，避免拖慢首屏。
     return {
         "code": info["code"],
         "name": info["name"],
@@ -83,7 +78,7 @@ def get_stock_detail(code: str, db: Session = Depends(get_db)):
         "is_active": info["is_active"],
         "financials": [f.model_dump() for f in financials],
         "announcements": [a.model_dump() for a in announcements],
-        "quick_analysis": quick,
+        "quick_analysis": None,
     }
 
 

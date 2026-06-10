@@ -5,7 +5,8 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useStockData } from '../hooks/useStockData'
-import { addToWatchlist, removeFromWatchlist, generateReport, getWatchlist, refreshStockData } from '../services/api'
+import { addToWatchlist, removeFromWatchlist, generateReport, getWatchlist, refreshStockData, quickAnalysis } from '../services/api'
+import type { QuickAnalysisResult } from '../types/stock'
 import AIAnalysis from '../components/AIAnalysis'
 import FinancialCharts from '../components/FinancialCharts'
 import IndustryComparison from '../components/IndustryComparison'
@@ -19,6 +20,29 @@ export default function StockDetailPage() {
   const [generating, setGenerating] = useState(false)
   const [watchlistLoading, setWatchlistLoading] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
+  const [aiAnalysis, setAiAnalysis] = useState<QuickAnalysisResult | null>(null)
+  const [aiLoading, setAiLoading] = useState(false)
+
+  // AI 快速分析：在详情数据加载完成后单独异步获取，避免拖慢首屏
+  useEffect(() => {
+    if (!data?.code) return
+    let cancelled = false
+    setAiAnalysis(null)
+    setAiLoading(true)
+    quickAnalysis(data.code)
+      .then((res) => {
+        if (!cancelled) setAiAnalysis(res.analysis as QuickAnalysisResult)
+      })
+      .catch(() => {
+        if (!cancelled) setAiAnalysis(null)
+      })
+      .finally(() => {
+        if (!cancelled) setAiLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [data?.code])
 
   // 检查是否已在自选
   useEffect(() => {
@@ -192,7 +216,7 @@ export default function StockDetailPage() {
       </div>
 
       {/* AI 快速分析 */}
-      <AIAnalysis analysis={data.quick_analysis} loading={false} />
+      <AIAnalysis analysis={aiAnalysis} loading={aiLoading} />
 
       {/* 财务图表 */}
       <FinancialCharts financials={data.financials} />
