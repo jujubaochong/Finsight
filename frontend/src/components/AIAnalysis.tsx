@@ -34,11 +34,13 @@ export default function AIAnalysis({ analysis, loading }: Props) {
       <div className="bg-white rounded-xl border border-gray-200 p-6">
         <div className="flex items-center gap-2 text-gray-400">
           <span className="text-lg">🤖</span>
-          <span className="text-sm">AI 分析尚未生成（请确认 API Key 已配置）</span>
+          <span className="text-sm">暂无分析数据，请点击「刷新数据」重试</span>
         </div>
       </div>
     )
   }
+
+  const isRuleBased = analysis.source === 'rule_engine'
 
   return (
     <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
@@ -46,10 +48,23 @@ export default function AIAnalysis({ analysis, loading }: Props) {
       <div className="px-6 pt-5 pb-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
-            <span className="text-lg">🤖</span>
-            <h2 className="font-semibold text-gray-800">AI 快速分析</h2>
-            <span className="text-xs bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full">
-              AI 生成 · 仅供参考
+            <span className="text-lg">{isRuleBased ? '📐' : '🤖'}</span>
+            <h2 className="font-semibold text-gray-800">
+              {isRuleBased ? '财务速览分析' : 'AI 快速分析'}
+            </h2>
+            <span
+              className={`text-xs px-2 py-0.5 rounded-full ${
+                isRuleBased
+                  ? 'bg-amber-50 text-amber-600'
+                  : 'bg-blue-50 text-blue-600'
+              }`}
+              title={
+                isRuleBased
+                  ? '基于真实财务指标的规则化分析（未启用 AI 模型）'
+                  : 'AI 模型生成'
+              }
+            >
+              {isRuleBased ? '规则分析 · 基于真实财务数据' : 'AI 生成 · 仅供参考'}
             </span>
           </div>
           <button

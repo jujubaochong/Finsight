@@ -333,8 +333,37 @@ class DataFetcher:
     # ========== 股票详情 ==========
 
     @staticmethod
+    def _expected_latest_period() -> str:
+        """根据当前日期推算"理应已披露"的最新报告期（保守，留出披露延迟）。
+
+        A 股披露节奏（截止次月/次季）：
+          - 一季报 4/30 前、半年报 8/31 前、三季报 10/31 前、年报次年 4/30 前。
+        这里用保守规则：只认"已确定过披露截止"的报告期，避免误判为陈旧而频繁拉取。
+        """
+        from datetime import date
+
+        today = date.today()
+        y, m = today.year, today.month
+        if m >= 11:          # 11-12 月：三季报已出
+            return f"{y}Q3"
+        if m >= 9:           # 9-10 月：半年报已出
+            return f"{y}Q2"
+        if m >= 5:           # 5-8 月：一季报已出
+            return f"{y}Q1"
+        # 1-4 月：上一年年报通常未必出全，保守认上上期三季报
+        return f"{y - 1}Q3"
+
+    @staticmethod
+    def _is_financials_stale(stock: Stock) -> bool:
+        """库中财务数据是否明显落后于'理应已披露'的报告期。"""
+        if not stock.financials:
+            return True
+        latest = max((f.report_period for f in stock.financials), default="")
+        return latest < DataFetcher._expected_latest_period()
+
+    @staticmethod
     def get_stock_detail(db: Session, code: str) -> dict | None:
-        """获取股票详情，按需触发数据同步"""
+        """获取股票详情，按需触发数据同步（含陈旧检测，自动补拉最新财报）"""
         stock = db.query(Stock).filter(Stock.code == code).first()
         if not stock:
             DataFetcher._sync_stock_list(db)
@@ -342,9 +371,11 @@ class DataFetcher:
         if not stock:
             return None
 
-        # 按需拉取财务数据（缓存控制）
+        # 按需拉取财务数据：为空 或 明显陈旧 时同步（缓存控制避免频繁拉取）
         cache_key = f"fin_synced:{code}"
-        if not stock.financials and not cache.get(cache_key):
+        if not cache.get(cache_key) and (
+            not stock.financials or DataFetcher._is_financials_stale(stock)
+        ):
             DataFetcher._sync_financials(db, stock)
             cache.set(cache_key, True, settings.cache_ttl_financials)
 

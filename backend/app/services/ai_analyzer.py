@@ -199,13 +199,24 @@ def _parse_ai_json(text: str) -> dict:
             raise
 
 
+def _rule_based_analysis(stock_info: dict, financials: list[dict], announcements: list[dict]) -> dict:
+    """规则化兜底分析（不依赖 AI / API Key），保证始终输出有用信息。"""
+    from app.services.insight_engine import InsightEngine
+
+    return InsightEngine.analyze(stock_info, financials, announcements)
+
+
 def quick_analysis(
     code: str,
     stock_info: dict,
     financials: list[dict],
     announcements: list[dict],
 ) -> dict:
-    """快速分析（轻量，用于详情页内嵌展示）"""
+    """快速分析（轻量，用于详情页内嵌展示）
+
+    优先调用 DeepSeek；未配置 Key 或调用失败时，自动降级为规则化洞察引擎，
+    依然基于真实财务数据输出'总结/亮点/风险/指标解读'，绝不返回无用占位。
+    """
 
     # 检查缓存
     cache_key = f"quick_analysis:{code}"
@@ -216,6 +227,13 @@ def quick_analysis(
 
     industry = stock_info.get("industry", "")
     industry_rules = _get_industry_rules(industry)
+
+    # 未配置 API Key：直接走规则引擎，不浪费时间重试
+    if not settings.deepseek_api_key:
+        logger.info(f"未配置 DeepSeek Key，使用规则化分析: {code}")
+        result = _rule_based_analysis(stock_info, financials, announcements)
+        cache.set(cache_key, result, settings.cache_ttl_analysis)
+        return result
 
     # 构建 prompt
     prompt = SYSTEM_PROMPT_QUICK.format(industry_rules=industry_rules)
@@ -256,6 +274,7 @@ def quick_analysis(
             result.setdefault("strengths", [])
             result.setdefault("risks", [])
             result.setdefault("metrics_commentary", "")
+            result["source"] = "ai"
 
             # 缓存结果
             cache.set(cache_key, result, settings.cache_ttl_analysis)
@@ -267,13 +286,11 @@ def quick_analysis(
             if attempt < settings.ai_max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                logger.error(f"快速分析最终失败: {code}")
-                return {
-                    "summary": f"AI 分析暂时不可用，请稍后重试",
-                    "strengths": ["数据已加载，AI 解读功能暂时不可用"],
-                    "risks": ["请检查 API 配置或网络连接"],
-                    "metrics_commentary": "可以查看下方图表了解财务趋势",
-                }
+                # AI 最终失败 → 降级为规则化分析，仍输出真实有用信息
+                logger.error(f"快速分析 AI 调用失败，降级为规则引擎: {code}")
+                result = _rule_based_analysis(stock_info, financials, announcements)
+                cache.set(cache_key, result, settings.cache_ttl_analysis)
+                return result
 
 
 def deep_analysis(
@@ -282,7 +299,17 @@ def deep_analysis(
     financials: list[dict],
     announcements: list[dict],
 ) -> str:
-    """深度分析 — 生成完整报告（Markdown）"""
+    """深度分析 — 生成完整报告（Markdown）
+
+    未配置 Key 或 AI 调用失败时，降级为规则化 Markdown 报告（基于真实数据）。
+    """
+    from app.services.insight_engine import InsightEngine
+
+    # 未配置 API Key：直接走规则化报告
+    if not settings.deepseek_api_key:
+        logger.info(f"未配置 DeepSeek Key，生成规则化报告: {code}")
+        return InsightEngine.build_report_markdown(stock_info, financials, announcements)
+
     industry = stock_info.get("industry", "")
     industry_rules = _get_industry_rules(industry)
     prompt = SYSTEM_PROMPT_REPORT.format(industry_rules=industry_rules)
@@ -317,18 +344,11 @@ def deep_analysis(
             if attempt < settings.ai_max_retries - 1:
                 time.sleep(2 ** attempt)
             else:
-                logger.error(f"深度分析最终失败: {code}")
-                return f"""# 报告生成失败
+                # AI 最终失败 → 降级为规则化 Markdown 报告
+                logger.error(f"深度分析 AI 调用失败，降级为规则化报告: {code}")
+                from app.services.insight_engine import InsightEngine
 
-**错误信息**：AI 服务暂时不可用
-
-**可能原因**：
-- API Key 配置错误
-- 网络连接问题
-- API 服务限流
-
-请检查后端 `.env` 文件中的 `DEEPSEEK_API_KEY` 配置，然后重试。
-"""
+                return InsightEngine.build_report_markdown(stock_info, financials, announcements)
 
 
 def summarize_announcement(title: str, content: str) -> str:

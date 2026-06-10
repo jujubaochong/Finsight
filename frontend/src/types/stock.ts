@@ -42,6 +42,7 @@ export interface QuickAnalysisResult {
   strengths: string[]
   risks: string[]
   metrics_commentary: string
+  source?: 'ai' | 'rule_engine'
 }
 
 export interface StockDetail {
