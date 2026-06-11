@@ -36,8 +36,13 @@ _MAX_RETRIES = 3
 # 单次 AkShare 调用的最长等待时间（秒）——超时即视为失败并重试/降级，
 # 避免 akshare 内部无超时的网络请求把整个接口（乃至事件循环）拖死。
 _AKSHARE_CALL_TIMEOUT = 12
-# 公告池抓取的总时间预算（秒），避免详情页/刷新长时间阻塞
-_NOTICE_FETCH_BUDGET = 25
+# 公告接口（stock_notice_report）单次调用超时：它抓取的是【全市场】单日公告，
+# 实测单日约需 15~25 秒，远超普通接口，因此单独给一个更宽松的超时，
+# 否则真实公告会被误判超时而降级到模拟数据。
+_NOTICE_CALL_TIMEOUT = 40
+# 公告池抓取的总时间预算（秒）。公告在后台线程异步抓取，不影响前端首屏，
+# 因此可以给足时间，确保能拉到真实公告。
+_NOTICE_FETCH_BUDGET = 130
 # 每只股票最多保留的财务报告期数
 _MAX_PERIODS = 8
 # 公告池回溯的交易日天数
@@ -698,6 +703,7 @@ class DataFetcher:
                     symbol="全部",
                     date=day.strftime("%Y%m%d"),
                     retries=1,
+                    timeout=_NOTICE_CALL_TIMEOUT,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.debug("获取 %s 公告失败: %s", day, e)
