@@ -5,9 +5,11 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useStockData } from '../hooks/useStockData'
-import { addToWatchlist, removeFromWatchlist, generateReport, getWatchlist, refreshStockData, quickAnalysis } from '../services/api'
-import type { QuickAnalysisResult } from '../types/stock'
+import { addToWatchlist, removeFromWatchlist, generateReport, getWatchlist, refreshStockData, quickAnalysis, getMarketSnapshot, shortTermResearch } from '../services/api'
+import type { QuickAnalysisResult, MarketSnapshot, ShortTermResult } from '../types/stock'
 import AIAnalysis from '../components/AIAnalysis'
+import TechnicalPanel from '../components/TechnicalPanel'
+import ShortTermAnalysis from '../components/ShortTermAnalysis'
 import FinancialCharts from '../components/FinancialCharts'
 import IndustryComparison from '../components/IndustryComparison'
 import SearchBar from '../components/SearchBar'
@@ -22,6 +24,49 @@ export default function StockDetailPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [aiAnalysis, setAiAnalysis] = useState<QuickAnalysisResult | null>(null)
   const [aiLoading, setAiLoading] = useState(false)
+  const [snapshot, setSnapshot] = useState<MarketSnapshot | null>(null)
+  const [snapshotLoading, setSnapshotLoading] = useState(false)
+  const [shortTerm, setShortTerm] = useState<ShortTermResult | null>(null)
+  const [shortTermLoading, setShortTermLoading] = useState(false)
+  const [shortTermGenerated, setShortTermGenerated] = useState(false)
+
+  // 技术面/资金面快照：详情加载后异步获取
+  useEffect(() => {
+    if (!data?.code) return
+    let cancelled = false
+    setSnapshot(null)
+    setShortTerm(null)
+    setShortTermGenerated(false)
+    setSnapshotLoading(true)
+    getMarketSnapshot(data.code, true)
+      .then((snap) => {
+        if (!cancelled) setSnapshot(snap)
+      })
+      .catch(() => {
+        if (!cancelled) setSnapshot(null)
+      })
+      .finally(() => {
+        if (!cancelled) setSnapshotLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [data?.code])
+
+  const handleShortTerm = async () => {
+    if (!data?.code) return
+    setShortTermGenerated(true)
+    setShortTermLoading(true)
+    try {
+      const res = await shortTermResearch(data.code)
+      setShortTerm(res.analysis)
+    } catch {
+      setShortTerm(null)
+      setShortTermGenerated(false)
+    } finally {
+      setShortTermLoading(false)
+    }
+  }
 
   // AI 快速分析：在详情数据加载完成后单独异步获取，避免拖慢首屏
   useEffect(() => {
@@ -217,6 +262,17 @@ export default function StockDetailPage() {
 
       {/* AI 快速分析 */}
       <AIAnalysis analysis={aiAnalysis} loading={aiLoading} />
+
+      {/* 技术面 · 资金面 */}
+      <TechnicalPanel snapshot={snapshot} loading={snapshotLoading} />
+
+      {/* AI 短线研判 */}
+      <ShortTermAnalysis
+        result={shortTerm}
+        loading={shortTermLoading}
+        onGenerate={handleShortTerm}
+        generated={shortTermGenerated}
+      />
 
       {/* 财务图表 */}
       <FinancialCharts financials={data.financials} />

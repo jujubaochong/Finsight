@@ -4,7 +4,7 @@
 import axios from 'axios'
 import type {
   StockDetail, SearchResponse, QuickAnalysisResult, ReportInfo,
-  WatchlistItem, AlertItem, IndustryComparison,
+  WatchlistItem, AlertItem, IndustryComparison, MarketSnapshot, ShortTermResult,
 } from '../types/stock'
 
 const api = axios.create({
@@ -111,6 +111,18 @@ export async function getIndustryComparison(code: string): Promise<IndustryCompa
 
 export async function getIndustryPeers(code: string): Promise<{ code: string; peers: any[]; count: number }> {
   const { data } = await api.get(`/industry/peers/${code}`)
+  return data
+}
+
+// ====== 行情 / 技术面 / 资金面 ======
+
+export async function getMarketSnapshot(code: string, lhb = false): Promise<MarketSnapshot> {
+  const { data } = await api.get(`/market/snapshot/${code}`, { params: { lhb } })
+  return data
+}
+
+export async function shortTermResearch(code: string): Promise<{ code: string; name: string; analysis: ShortTermResult }> {
+  const { data } = await api.post(`/market/short-term/${code}`)
   return data
 }
 

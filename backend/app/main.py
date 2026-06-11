@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.database import engine
 from app.models.stock import Base
-from app.routers import stocks, analysis, reports, alerts, industry
+from app.routers import stocks, analysis, reports, alerts, industry, market
 from app.logger import setup_logging
 from app.background_tasks import start_background_tasks
 
@@ -114,6 +114,7 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["AI分析"])
 app.include_router(reports.router, prefix="/api/reports", tags=["报告"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["异动监控"])
 app.include_router(industry.router, prefix="/api/industry", tags=["行业对标"])
+app.include_router(market.router, prefix="/api/market", tags=["行情技术面"])
 
 
 @app.get("/health")

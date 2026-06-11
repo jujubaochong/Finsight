@@ -358,3 +358,106 @@ def summarize_announcement(title: str, content: str) -> str:
     except Exception as e:
         logger.warning(f"公告摘要生成失败: {e}")
         return ""
+
+
+
+# ========== 短线技术面 + 资金面研判 ==========
+
+SYSTEM_PROMPT_SHORT_TERM = """你是一名经验丰富的A股短线交易研判员。基于提供的【技术面 + 资金面】数据，
+用短线交易者熟悉的语言，客观研判这只股票近期的机会与风险。
+
+== 你掌握的短线概念（请在解读时恰当使用）==
+- 吸筹：主力资金持续净流入但股价未明显拉升，可能在低位收集筹码
+- 出货/派发：主力持续净流出，常伴随股价滞涨或下跌
+- 承接：股价回调时仍有大单买入接盘，说明有资金护盘
+- 炸板：盘中涨停后被打开（封板失败），多为短线情绪转弱信号
+- 金叉/死叉：MACD 的 DIF 上穿/下穿 DEA
+- 超买/超卖：KDJ 的 J 值 >100 偏超买、<0 偏超卖；RSI >70 超买、<30 超卖
+- 均线多头/空头排列：MA5>MA10>MA20 为多头，反之空头
+
+== 输入数据说明 ==
+- latest：最新价、当日涨跌幅、换手率、近5日涨幅
+- indicators：MA5/10/20/60、MACD(dif/dea/macd/cross)、KDJ、RSI
+- fund_flow：主力资金信号（signal/label）、近5日主力净额(亿)、当日主力净额(亿)、近5日净流入天数
+- lhb：近期龙虎榜记录（上榜原因、净买额、上榜后表现）
+
+== 输出格式 ==
+只输出纯JSON（不要markdown代码块）：
+
+{{
+  "rating": "用一个词概括短期倾向：偏多/中性/偏空（仅技术与资金面，非投资建议）",
+  "summary": "一句话总结当前技术面与资金面的核心状态（60字内）",
+  "technical": "技术面解读：结合均线排列、MACD金叉死叉、KDJ/RSI超买超卖，2-3句话",
+  "capital": "资金面解读：结合主力净流入趋势判断吸筹/出货/承接，引用具体数字，2-3句话",
+  "opportunities": ["机会1（要有数据支撑）", "机会2"],
+  "risks": ["风险1（要有数据支撑）", "风险2"],
+  "lhb_note": "若有龙虎榜数据则简评主力席位行为，无则填 '近期无龙虎榜记录'"
+}}
+
+== 严格约束 ==
+1. 所有数字必须引用输入数据，不能编造
+2. 绝对不能给出买卖点、目标价、仓位建议
+3. 必须在 summary 或 rating 后隐含提示这是技术研判而非投资建议
+4. 数据不足时诚实说明
+5. opportunities 和 risks 各 2-3 条，必须有数据支撑
+6. 不要输出 markdown 代码块标记"""
+
+
+def short_term_analysis(code: str, name: str, industry: str, snapshot: dict) -> dict:
+    """基于技术面+资金面快照，生成短线研判（带缓存）"""
+    cache_key = f"short_term:{code}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    context = {
+        "股票代码": code,
+        "股票名称": name,
+        "行业": industry or "未知",
+        "latest": snapshot.get("latest", {}),
+        "indicators": {k: v for k, v in snapshot.get("indicators", {}).items() if k != "series"},
+        "fund_flow": {k: v for k, v in snapshot.get("fund_flow", {}).items() if k != "series"},
+        "lhb": snapshot.get("lhb", [])[:5],
+    }
+
+    fallback = {
+        "rating": "中性",
+        "summary": "AI 短线研判暂时不可用，请稍后重试（可参考下方技术指标与资金流图表）",
+        "technical": "",
+        "capital": "",
+        "opportunities": [],
+        "risks": ["AI 服务暂时不可用，请检查 API 配置或网络"],
+        "lhb_note": "",
+    }
+
+    for attempt in range(settings.ai_max_retries):
+        try:
+            client = _get_client()
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_SHORT_TERM},
+                    {"role": "user", "content": json.dumps(context, ensure_ascii=False, indent=2)},
+                ],
+                temperature=0.3,
+                max_tokens=2000,
+            )
+            text = resp.choices[0].message.content.strip()
+            result = _parse_ai_json(text)
+            if "summary" not in result:
+                raise ValueError("AI 返回缺少 summary 字段")
+            result.setdefault("rating", "中性")
+            result.setdefault("technical", "")
+            result.setdefault("capital", "")
+            result.setdefault("opportunities", [])
+            result.setdefault("risks", [])
+            result.setdefault("lhb_note", "")
+            cache.set(cache_key, result, settings.cache_ttl_analysis)
+            logger.info(f"短线研判完成: {code}")
+            return result
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"短线研判失败 (attempt {attempt + 1}): {code} - {e}")
+            if attempt < settings.ai_max_retries - 1:
+                time.sleep(2 ** attempt)
+    logger.error(f"短线研判最终失败: {code}")
+    return fallback
