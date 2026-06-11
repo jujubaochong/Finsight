@@ -335,10 +335,10 @@ def fetch_industry_boards(top: int = 8) -> list[dict]:
     """行业板块行情（按涨跌幅排序，取领涨/领跌）"""
     ck = f"ind_boards:{top}"
     cached = cache.get(ck)
-    if cached is not None:
+    if cached:  # 只在有数据时用缓存，空结果不缓存以便下次重试
         return cached
 
-    df = _retry_akshare(ak.stock_board_industry_name_em, retries=1, timeout=30)
+    df = _retry_akshare(ak.stock_board_industry_name_em, retries=2, timeout=60)
     rows: list[dict] = []
     if df is not None and not df.empty:
         # 兼容列名差异
@@ -360,7 +360,8 @@ def fetch_industry_boards(top: int = 8) -> list[dict]:
                     "lead_stock": str(r.get(c_lead, "")) if c_lead else "",
                     "price": _safe_float(r.get(c_price)) if c_price else None,
                 })
-    cache.set(ck, rows, _TTL_OVERVIEW)
+    if rows:
+        cache.set(ck, rows, _TTL_OVERVIEW)
     return rows
 
 
@@ -368,12 +369,17 @@ def fetch_potential_stocks(top: int = 10) -> list[dict]:
     """潜力股：按当日主力净流入排行 + 适度涨幅过滤（强势但非涨停板）"""
     ck = f"potential:{top}"
     cached = cache.get(ck)
-    if cached is not None:
+    if cached:  # 空结果不缓存，便于下次重试
         return cached
 
-    df = _retry_akshare(
-        ak.stock_individual_fund_flow_rank, indicator="今日", retries=1, timeout=30
-    )
+    # 优先"今日"，失败/为空再退"3日"，提升可用性
+    df = None
+    for indic in ("今日", "3日"):
+        df = _retry_akshare(
+            ak.stock_individual_fund_flow_rank, indicator=indic, retries=2, timeout=60
+        )
+        if df is not None and not df.empty:
+            break
     rows: list[dict] = []
     if df is not None and not df.empty:
         def col(*names):
@@ -384,19 +390,22 @@ def fetch_potential_stocks(top: int = 10) -> list[dict]:
         c_code = col("代码")
         c_name = col("名称")
         c_price = col("最新价")
-        c_pct = col("今日涨跌幅", "涨跌幅")
-        c_main = col("今日主力净流入-净额", "主力净流入-净额")
-        c_main_pct = col("今日主力净流入-净占比", "主力净流入-净占比")
+        c_pct = col("今日涨跌幅", "3日涨跌幅", "涨跌幅")
+        c_main = col("今日主力净流入-净额", "3日主力净流入-净额", "主力净流入-净额")
+        c_main_pct = col("今日主力净流入-净占比", "3日主力净流入-净占比", "主力净流入-净占比")
         if c_code and c_main:
-            # 主力净流入为正、涨幅在 1%~8%（强势但非追高涨停）
             df = df.copy()
             df["_main"] = df[c_main].apply(_safe_float)
             df["_pct"] = df[c_pct].apply(_safe_float) if c_pct else 0
             df = df[df["_main"].notna() & (df["_main"] > 0)]
+            # 优先做"强势非追高"过滤；若过滤后过少，则放宽（保证榜单有内容）
+            filtered = df
             if c_pct:
-                df = df[(df["_pct"] >= 1) & (df["_pct"] <= 8)]
-            df = df.sort_values("_main", ascending=False)
-            for _, r in df.head(top).iterrows():
+                strong = df[(df["_pct"] >= 1) & (df["_pct"] <= 8)]
+                if len(strong) >= 5:
+                    filtered = strong
+            filtered = filtered.sort_values("_main", ascending=False)
+            for _, r in filtered.head(top).iterrows():
                 code = str(r.get(c_code, "")).strip()
                 if len(code) != 6 or not code.isdigit():
                     continue
@@ -408,7 +417,8 @@ def fetch_potential_stocks(top: int = 10) -> list[dict]:
                     "main_net": round((_safe_float(r.get(c_main)) or 0) / 1e8, 2),
                     "main_net_pct": _safe_float(r.get(c_main_pct)) if c_main_pct else None,
                 })
-    cache.set(ck, rows, _TTL_OVERVIEW)
+    if rows:
+        cache.set(ck, rows, _TTL_OVERVIEW)
     return rows
 
 

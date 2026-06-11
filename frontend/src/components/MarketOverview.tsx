@@ -49,8 +49,14 @@ export default function MarketOverview() {
 
   if (!data || (data.boards.length === 0 && data.potential.length === 0)) {
     return (
-      <div className="bg-white rounded-xl border border-gray-200 p-5 text-sm text-gray-400">
-        📡 市场概览数据暂时不可用（行情接口可能限频，请稍后刷新）
+      <div className="bg-white rounded-xl border border-gray-200 p-5 text-sm text-gray-500 flex items-center justify-between">
+        <span>📡 市场概览数据暂时不可用（行情接口可能限频或非交易时段）</span>
+        <button
+          onClick={() => { setLoading(true); getMarketOverview().then(setData).catch(() => setData(null)).finally(() => setLoading(false)) }}
+          className="px-3 py-1.5 text-xs rounded-lg border border-gray-300 text-gray-600 hover:bg-gray-50"
+        >
+          重新加载
+        </button>
       </div>
     )
   }
