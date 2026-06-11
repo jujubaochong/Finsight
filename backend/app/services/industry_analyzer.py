@@ -71,7 +71,7 @@ class IndustryAnalyzer:
         peer_data = []
         for peer in peers:
             try:
-                fin_list = DataFetcher.get_financials(db, peer)
+                fin_list = DataFetcher.get_financials(db, peer, fetch_if_missing=False)
                 if fin_list:
                     latest = fin_list[-1]
                     peer_data.append({
@@ -245,7 +245,7 @@ class IndustryAnalyzer:
                 # 收集所有财务指标
                 all_financials = []
                 for stock in peers:
-                    fin_data = DataFetcher.get_financials(db, stock)
+                    fin_data = DataFetcher.get_financials(db, stock, fetch_if_missing=False)
                     if fin_data and len(fin_data) > 0:
                         all_financials.extend(fin_data)
                 

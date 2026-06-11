@@ -579,9 +579,17 @@ class DataFetcher:
     # ========== 财务数据获取（供 API / AI 使用）==========
 
     @staticmethod
-    def get_financials(db: Session, stock: Stock) -> list[dict]:
-        """获取股票的财务数据列表（含计算指标）"""
-        if not stock.financials:
+    def get_financials(
+        db: Session, stock: Stock, fetch_if_missing: bool = True
+    ) -> list[dict]:
+        """获取股票的财务数据列表（含计算指标）
+
+        :param fetch_if_missing: 数据库无财务数据时是否联网拉取。
+            批量场景（行业基准、同行对比、异动扫描）必须传 False，
+            否则会对成百上千只股票逐只联网拉取，造成启动/请求长时间卡死
+            （网络风暴）。仅单只股票详情页等场景才用默认 True。
+        """
+        if not stock.financials and fetch_if_missing:
             DataFetcher._sync_financials(db, stock)
             db.refresh(stock)
 
