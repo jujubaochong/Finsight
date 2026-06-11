@@ -5,6 +5,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import SearchBar, { getRecentSearches } from '../components/SearchBar'
+import MarketOverview from '../components/MarketOverview'
 import type { StockBrief } from '../types/stock'
 
 const HOT_STOCKS: StockBrief[] = [
@@ -79,6 +80,15 @@ export default function HomePage() {
             </button>
           ))}
         </div>
+      </div>
+
+      {/* 市场概览：板块 + 主力净流入潜力股 */}
+      <div className="w-full max-w-4xl mt-12">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-800">📊 市场概览</h2>
+          <span className="text-xs text-gray-400">实时行情 · 数据来源 AkShare</span>
+        </div>
+        <MarketOverview />
       </div>
 
       {/* 底部说明 */}

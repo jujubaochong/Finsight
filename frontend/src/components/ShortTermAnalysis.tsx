@@ -30,9 +30,16 @@ export default function ShortTermAnalysis({ result, loading, onGenerate, generat
             </span>
           </div>
           {result && (
-            <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${ratingStyle(result.rating)}`}>
-              短期倾向：{result.rating}
-            </span>
+            <div className="flex items-center gap-2">
+              {result.phase && (
+                <span className="text-xs px-2.5 py-1 rounded-full border font-medium bg-indigo-50 text-indigo-600 border-indigo-100">
+                  主力：{result.phase}
+                </span>
+              )}
+              <span className={`text-xs px-2.5 py-1 rounded-full border font-medium ${ratingStyle(result.rating)}`}>
+                短期倾向：{result.rating}
+              </span>
+            </div>
           )}
         </div>
 
@@ -110,6 +117,14 @@ export default function ShortTermAnalysis({ result, loading, onGenerate, generat
             <div className="bg-gray-50 rounded-lg p-4 border border-gray-100">
               <h3 className="text-sm font-medium text-gray-600 mb-2">🏆 龙虎榜 / 主力席位</h3>
               <p className="text-sm text-gray-700 leading-relaxed">{result.lhb_note}</p>
+            </div>
+          )}
+
+          {/* 主力阶段判断理由 */}
+          {result.phase_reason && (
+            <div className="bg-indigo-50 rounded-lg p-4 border border-indigo-100">
+              <h3 className="text-sm font-medium text-indigo-700 mb-2">🎯 主力阶段研判（{result.phase}）</h3>
+              <p className="text-sm text-indigo-900 leading-relaxed">{result.phase_reason}</p>
             </div>
           )}
 

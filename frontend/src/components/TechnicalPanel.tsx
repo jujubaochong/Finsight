@@ -60,6 +60,14 @@ export default function TechnicalPanel({ snapshot, loading }: Props) {
   const ind = snapshot.indicators || {}
   const ff = snapshot.fund_flow || {}
   const latest = snapshot.latest || {}
+  const phase = snapshot.main_phase
+
+  const phaseStyle: Record<string, string> = {
+    orange: 'bg-orange-50 text-orange-700 border-orange-200',
+    red: 'bg-red-50 text-red-700 border-red-200',
+    green: 'bg-green-50 text-green-700 border-green-200',
+    gray: 'bg-gray-50 text-gray-600 border-gray-200',
+  }
 
   const maTone = (ind.ma5 ?? 0) > (ind.ma20 ?? 0) ? 'up' : 'down'
   const crossLabel = ind.macd_cross === 'golden' ? '金叉' : ind.macd_cross === 'dead' ? '死叉' : '—'
@@ -77,6 +85,22 @@ export default function TechnicalPanel({ snapshot, loading }: Props) {
         <h2 className="font-semibold text-gray-800">技术面 · 资金面</h2>
         <span className="text-xs bg-amber-50 text-amber-600 px-2 py-0.5 rounded-full">日线数据 · 仅供研判</span>
       </div>
+
+      {/* 主力阶段研判横幅 */}
+      {phase && phase.phase !== 'unknown' && (
+        <div className="px-6 mb-1 mt-1">
+          <div className={`rounded-lg px-4 py-3 border ${phaseStyle[phase.color] || phaseStyle.gray}`}>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-sm font-semibold">🎯 主力阶段：{phase.label}</span>
+            </div>
+            <ul className="text-xs space-y-0.5 opacity-90">
+              {phase.reasons.map((r, i) => (
+                <li key={i}>· {r}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
 
       {/* 指标卡片 */}
       <div className="px-6 grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">

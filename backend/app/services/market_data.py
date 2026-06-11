@@ -307,7 +307,7 @@ def get_market_snapshot(code: str, include_lhb: bool = False) -> dict:
     if len(kline) >= 6 and kline[-6]["close"]:
         chg_5d = round((kline[-1]["close"] - kline[-6]["close"]) / kline[-6]["close"] * 100, 2)
 
-    return {
+    snap = {
         "code": code,
         "latest": {
             "date": latest.get("date"),
@@ -320,3 +320,167 @@ def get_market_snapshot(code: str, include_lhb: bool = False) -> dict:
         "fund_flow": fund_signal,
         "lhb": results.get("lhb", []),
     }
+    # 主力阶段研判（规则推断）
+    snap["main_phase"] = judge_main_phase(snap)
+    return snap
+
+
+
+# ============== 市场概览：板块 + 潜力股（首页用） ==============
+
+_TTL_OVERVIEW = 900  # 概览缓存 15 分钟
+
+
+def fetch_industry_boards(top: int = 8) -> list[dict]:
+    """行业板块行情（按涨跌幅排序，取领涨/领跌）"""
+    ck = f"ind_boards:{top}"
+    cached = cache.get(ck)
+    if cached is not None:
+        return cached
+
+    df = _retry_akshare(ak.stock_board_industry_name_em, retries=1, timeout=30)
+    rows: list[dict] = []
+    if df is not None and not df.empty:
+        # 兼容列名差异
+        def col(*names):
+            for n in names:
+                if n in df.columns:
+                    return n
+            return None
+        c_name = col("板块名称", "名称")
+        c_pct = col("涨跌幅")
+        c_lead = col("领涨股票", "领涨股")
+        c_price = col("最新价")
+        if c_name and c_pct:
+            df = df.sort_values(c_pct, ascending=False)
+            for _, r in df.head(top).iterrows():
+                rows.append({
+                    "name": str(r.get(c_name, "")),
+                    "pct_chg": _safe_float(r.get(c_pct)),
+                    "lead_stock": str(r.get(c_lead, "")) if c_lead else "",
+                    "price": _safe_float(r.get(c_price)) if c_price else None,
+                })
+    cache.set(ck, rows, _TTL_OVERVIEW)
+    return rows
+
+
+def fetch_potential_stocks(top: int = 10) -> list[dict]:
+    """潜力股：按当日主力净流入排行 + 适度涨幅过滤（强势但非涨停板）"""
+    ck = f"potential:{top}"
+    cached = cache.get(ck)
+    if cached is not None:
+        return cached
+
+    df = _retry_akshare(
+        ak.stock_individual_fund_flow_rank, indicator="今日", retries=1, timeout=30
+    )
+    rows: list[dict] = []
+    if df is not None and not df.empty:
+        def col(*names):
+            for n in names:
+                if n in df.columns:
+                    return n
+            return None
+        c_code = col("代码")
+        c_name = col("名称")
+        c_price = col("最新价")
+        c_pct = col("今日涨跌幅", "涨跌幅")
+        c_main = col("今日主力净流入-净额", "主力净流入-净额")
+        c_main_pct = col("今日主力净流入-净占比", "主力净流入-净占比")
+        if c_code and c_main:
+            # 主力净流入为正、涨幅在 1%~8%（强势但非追高涨停）
+            df = df.copy()
+            df["_main"] = df[c_main].apply(_safe_float)
+            df["_pct"] = df[c_pct].apply(_safe_float) if c_pct else 0
+            df = df[df["_main"].notna() & (df["_main"] > 0)]
+            if c_pct:
+                df = df[(df["_pct"] >= 1) & (df["_pct"] <= 8)]
+            df = df.sort_values("_main", ascending=False)
+            for _, r in df.head(top).iterrows():
+                code = str(r.get(c_code, "")).strip()
+                if len(code) != 6 or not code.isdigit():
+                    continue
+                rows.append({
+                    "code": code,
+                    "name": str(r.get(c_name, "")),
+                    "price": _safe_float(r.get(c_price)) if c_price else None,
+                    "pct_chg": _safe_float(r.get(c_pct)) if c_pct else None,
+                    "main_net": round((_safe_float(r.get(c_main)) or 0) / 1e8, 2),
+                    "main_net_pct": _safe_float(r.get(c_main_pct)) if c_main_pct else None,
+                })
+    cache.set(ck, rows, _TTL_OVERVIEW)
+    return rows
+
+
+def get_market_overview() -> dict:
+    """首页市场概览：板块 + 潜力股（并行抓取）"""
+    f_board = _executor.submit(fetch_industry_boards)
+    f_pot = _executor.submit(fetch_potential_stocks)
+    boards, potential = [], []
+    try:
+        boards = f_board.result()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("板块抓取失败: %s", e)
+    try:
+        potential = f_pot.result()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("潜力股抓取失败: %s", e)
+    return {"boards": boards, "potential": potential}
+
+
+# ============== 主力阶段研判（建仓/启动/离场） ==============
+
+def judge_main_phase(snapshot: dict) -> dict:
+    """基于资金流 + 量价 + 均线，规则判断主力所处阶段。
+
+    返回 {phase, label, color, reasons[]}，纯规则推断，作为 AI 研判的补充与兜底。
+    阶段：building(建仓/吸筹) / launching(启动) / leaving(离场/派发) / unknown(观望)
+    """
+    ff = snapshot.get("fund_flow", {})
+    ind = snapshot.get("indicators", {})
+    latest = snapshot.get("latest", {})
+
+    main_5d = ff.get("main_net_5d")
+    pos_days = ff.get("positive_days_5d")
+    pct_today = latest.get("pct_chg")
+    chg_5d = latest.get("chg_5d")
+    ma5, ma20 = ind.get("ma5"), ind.get("ma20")
+    cross = ind.get("macd_cross")
+    turnover = latest.get("turnover")
+
+    reasons: list[str] = []
+    phase, label, color = "unknown", "信号不明（建议观望）", "gray"
+
+    if main_5d is None or pos_days is None:
+        return {"phase": phase, "label": label, "color": color,
+                "reasons": ["资金面数据不足，无法判断主力阶段"]}
+
+    up_trend = (ma5 is not None and ma20 is not None and ma5 > ma20)
+
+    # 离场/派发：主力持续净流出
+    if main_5d < 0 and (pos_days is not None and pos_days <= 1):
+        phase, label, color = "leaving", "疑似主力离场 / 派发", "green"
+        reasons.append(f"近5日主力净流出 {abs(main_5d):.2f} 亿，净流入仅 {pos_days}/5 天")
+        if chg_5d is not None and chg_5d < 0:
+            reasons.append(f"近5日股价下跌 {chg_5d:.2f}%，量价配合走弱")
+        if ma5 is not None and ma20 is not None and ma5 < ma20:
+            reasons.append("MA5 下穿 MA20，短期均线转弱")
+    # 启动：主力净流入 + 放量上涨 + 均线多头
+    elif main_5d > 0 and pct_today is not None and pct_today > 3 and up_trend:
+        phase, label, color = "launching", "疑似启动 / 拉升", "red"
+        reasons.append(f"今日涨幅 {pct_today:.2f}%，近5日主力净流入 {main_5d:.2f} 亿")
+        if cross == "golden":
+            reasons.append("MACD 金叉，动能转强")
+        if turnover is not None and turnover > 5:
+            reasons.append(f"换手率 {turnover:.2f}%，量能放大")
+    # 建仓/吸筹：主力持续净流入但股价温和（未明显拉升）
+    elif main_5d > 0 and (pos_days is not None and pos_days >= 3) and (chg_5d is None or abs(chg_5d) < 8):
+        phase, label, color = "building", "疑似主力建仓 / 吸筹", "orange"
+        reasons.append(f"近5日主力净流入 {main_5d:.2f} 亿，净流入 {pos_days}/5 天")
+        reasons.append(f"同期股价波动温和（近5日 {chg_5d if chg_5d is not None else 0:.2f}%），疑似低位收集筹码")
+        if turnover is not None and turnover < 5:
+            reasons.append(f"换手率 {turnover:.2f}%，未明显放量，符合吸筹特征")
+    else:
+        reasons.append(f"近5日主力净额 {main_5d:.2f} 亿、净流入 {pos_days}/5 天，多空交织，方向待确认")
+
+    return {"phase": phase, "label": label, "color": color, "reasons": reasons}

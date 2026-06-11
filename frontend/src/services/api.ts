@@ -5,6 +5,7 @@ import axios from 'axios'
 import type {
   StockDetail, SearchResponse, QuickAnalysisResult, ReportInfo,
   WatchlistItem, AlertItem, IndustryComparison, MarketSnapshot, ShortTermResult,
+  MarketOverview,
 } from '../types/stock'
 
 const api = axios.create({
@@ -123,6 +124,11 @@ export async function getMarketSnapshot(code: string, lhb = false): Promise<Mark
 
 export async function shortTermResearch(code: string): Promise<{ code: string; name: string; analysis: ShortTermResult }> {
   const { data } = await api.post(`/market/short-term/${code}`)
+  return data
+}
+
+export async function getMarketOverview(): Promise<MarketOverview> {
+  const { data } = await api.get('/market/overview')
   return data
 }
 

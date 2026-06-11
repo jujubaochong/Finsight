@@ -6,10 +6,16 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models.stock import Stock
-from app.services.market_data import get_market_snapshot
+from app.services.market_data import get_market_snapshot, get_market_overview
 from app.services.ai_analyzer import short_term_analysis
 
 router = APIRouter()
+
+
+@router.get("/overview")
+def market_overview():
+    """首页市场概览：行业板块涨跌 + 主力净流入潜力股（并行抓取，带缓存）"""
+    return get_market_overview()
 
 
 @router.get("/snapshot/{code}")

@@ -190,14 +190,43 @@ export interface MarketSnapshot {
     after_1d: number | null
     after_5d: number | null
   }[]
+  main_phase?: {
+    phase: 'building' | 'launching' | 'leaving' | 'unknown'
+    label: string
+    color: 'orange' | 'red' | 'green' | 'gray'
+    reasons: string[]
+  }
 }
 
 export interface ShortTermResult {
   rating: string
+  phase: string
   summary: string
   technical: string
   capital: string
+  phase_reason: string
   opportunities: string[]
   risks: string[]
   lhb_note: string
+}
+
+export interface IndustryBoard {
+  name: string
+  pct_chg: number | null
+  lead_stock: string
+  price: number | null
+}
+
+export interface PotentialStock {
+  code: string
+  name: string
+  price: number | null
+  pct_chg: number | null
+  main_net: number
+  main_net_pct: number | null
+}
+
+export interface MarketOverview {
+  boards: IndustryBoard[]
+  potential: PotentialStock[]
 }
