@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import logging
 import math
+import concurrent.futures
+import threading
 import time
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -31,19 +33,63 @@ logger = logging.getLogger(__name__)
 _API_SLEEP = 0.6
 # 最大重试次数
 _MAX_RETRIES = 3
+# 单次 AkShare 调用的最长等待时间（秒）——超时即视为失败并重试/降级，
+# 避免 akshare 内部无超时的网络请求把整个接口（乃至事件循环）拖死。
+_AKSHARE_CALL_TIMEOUT = 12
+# 公告接口（stock_notice_report）单次调用超时：它抓取的是【全市场】单日公告，
+# 实测单日约需 15~25 秒，远超普通接口，因此单独给一个更宽松的超时，
+# 否则真实公告会被误判超时而降级到模拟数据。
+_NOTICE_CALL_TIMEOUT = 40
+# 公告池抓取的总时间预算（秒）。公告在后台线程异步抓取，不影响前端首屏，
+# 因此可以给足时间，确保能拉到真实公告。
+_NOTICE_FETCH_BUDGET = 130
 # 每只股票最多保留的财务报告期数
 _MAX_PERIODS = 8
 # 公告池回溯的交易日天数
-_NOTICE_LOOKBACK_DAYS = 5
+_NOTICE_LOOKBACK_DAYS = 3
+
+# 后台股票列表同步的并发保护（避免短时间内启动多个同步线程）
+_stock_list_sync_lock = threading.Lock()
+_stock_list_sync_in_progress = False
+
+# 专用于执行 akshare 阻塞调用的线程池（配合 future.result(timeout) 实现单次调用超时）
+_akshare_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=4, thread_name_prefix="akshare"
+)
 
 
-def _retry_akshare(func, *args, retries: int = _MAX_RETRIES, **kwargs):
-    """带重试 + 指数退避的 AkShare 调用"""
+def _retry_akshare(
+    func,
+    *args,
+    retries: int = _MAX_RETRIES,
+    timeout: float = _AKSHARE_CALL_TIMEOUT,
+    **kwargs,
+):
+    """带重试 + 指数退避 + 单次超时的 AkShare 调用
+
+    akshare 底层的网络请求大多没有设置超时，一旦数据源无响应就会无限挂起。
+    这里用线程池 + ``future.result(timeout)`` 给每次调用加一个硬上限：超时即
+    当作失败处理，触发重试，最终交由上层降级到模拟数据。
+    """
     last_exc: Exception | None = None
     for attempt in range(retries):
+        time.sleep(_API_SLEEP)
+        future = _akshare_executor.submit(func, *args, **kwargs)
         try:
-            time.sleep(_API_SLEEP)
-            return func(*args, **kwargs)
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            last_exc = TimeoutError(
+                f"AkShare 调用超时（>{timeout}s）: "
+                f"{getattr(func, '__name__', str(func))}"
+            )
+            future.cancel()
+            logger.warning(
+                "AkShare 调用超时 (attempt %s/%s): %s (>%ss)",
+                attempt + 1,
+                retries,
+                getattr(func, "__name__", str(func)),
+                timeout,
+            )
         except Exception as e:  # noqa: BLE001 - akshare 抛出的异常类型不固定
             last_exc = e
             logger.warning(
@@ -53,8 +99,8 @@ def _retry_akshare(func, *args, retries: int = _MAX_RETRIES, **kwargs):
                 getattr(func, "__name__", str(func)),
                 e,
             )
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)  # 指数退避
+        if attempt < retries - 1:
+            time.sleep(2 ** attempt)  # 指数退避
     if last_exc is not None:
         raise last_exc
     return None
@@ -94,7 +140,12 @@ class DataFetcher:
 
     @staticmethod
     def search_stock(db: Session, keyword: str) -> list[dict]:
-        """模糊搜索股票（优先数据库，未命中再同步列表）"""
+        """模糊搜索股票（只查数据库，绝不在请求路径上做慢速网络下载）
+
+        关键改动：数据库未命中时**不再同步阻塞地**去 akshare 拉取整张股票列表
+        （那会拖到前端 60s 超时，并阻塞整个事件循环）。改为在后台线程异步触发
+        列表同步，本次请求立即返回当前结果；列表同步完成后，后续搜索即可命中。
+        """
         if not keyword or not keyword.strip():
             return []
 
@@ -104,10 +155,76 @@ class DataFetcher:
         if results:
             return results
 
-        # 数据库没有 → 同步股票列表后重新搜索
-        logger.info("数据库未命中关键词 '%s'，尝试同步股票列表", keyword)
-        DataFetcher._sync_stock_list(db)
-        return DataFetcher._query_stocks(db, keyword)
+        # 数据库未命中 → 触发后台异步同步（不阻塞本次请求），立即返回当前结果
+        logger.info("数据库未命中关键词 '%s'，已触发后台同步股票列表", keyword)
+        DataFetcher._trigger_stock_list_sync_async()
+        return results
+
+    @staticmethod
+    def _trigger_stock_list_sync_async() -> None:
+        """在后台线程异步同步 A 股股票列表，避免阻塞搜索请求与事件循环。
+
+        通过模块级锁 + 标志位保证同一时刻最多只有一个同步线程在跑，
+        重复触发会被直接忽略。
+        """
+        global _stock_list_sync_in_progress
+
+        # 近期已同步则无需再触发
+        if cache.get("stock_list_synced"):
+            return
+
+        with _stock_list_sync_lock:
+            if _stock_list_sync_in_progress:
+                return
+            _stock_list_sync_in_progress = True
+
+        def _worker() -> None:
+            global _stock_list_sync_in_progress
+            from app.database import SessionLocal
+
+            worker_db = SessionLocal()
+            try:
+                DataFetcher._sync_stock_list(worker_db)
+            except Exception as e:  # noqa: BLE001
+                logger.error("后台同步股票列表失败: %s", e)
+            finally:
+                worker_db.close()
+                with _stock_list_sync_lock:
+                    _stock_list_sync_in_progress = False
+
+        threading.Thread(
+            target=_worker, name="stock-list-sync", daemon=True
+        ).start()
+
+    @staticmethod
+    def _trigger_announcements_sync_async(code: str) -> None:
+        """在后台线程异步同步某只股票的公告（全市场公告抓取很重，不放在请求路径上）。
+
+        用缓存键做简单防抖：2 分钟内同一只股票不重复触发；成功后写入
+        ``ann_synced:{code}`` 缓存，避免下次进入详情页再次触发。
+        """
+        if cache.get(f"ann_synced:{code}") or cache.get(f"ann_syncing:{code}"):
+            return
+        cache.set(f"ann_syncing:{code}", True, 120)
+
+        def _worker() -> None:
+            from app.database import SessionLocal
+
+            worker_db = SessionLocal()
+            try:
+                stock = worker_db.query(Stock).filter(Stock.code == code).first()
+                if stock:
+                    DataFetcher._sync_announcements(worker_db, stock)
+                    cache.set(f"ann_synced:{code}", True, settings.cache_ttl_financials)
+            except Exception as e:  # noqa: BLE001
+                logger.error("后台同步公告失败 %s: %s", code, e)
+            finally:
+                worker_db.close()
+                cache.delete(f"ann_syncing:{code}")
+
+        threading.Thread(
+            target=_worker, name=f"ann-sync-{code}", daemon=True
+        ).start()
 
     @staticmethod
     def _query_stocks(db: Session, keyword: str) -> list[dict]:
@@ -267,17 +384,18 @@ class DataFetcher:
         if not stock:
             return None
 
-        # 按需拉取财务数据（缓存控制）
+        # 按需拉取财务数据（缓存控制）——保留同步拉取：财务是详情页核心内容，
+        # 且为单只股票的定向查询，已被单次调用超时（12s）兜底，首次后即走缓存。
         cache_key = f"fin_synced:{code}"
         if not stock.financials and not cache.get(cache_key):
             DataFetcher._sync_financials(db, stock)
             cache.set(cache_key, True, settings.cache_ttl_financials)
 
-        # 按需拉取公告
-        cache_key_ann = f"ann_synced:{code}"
-        if not stock.announcements and not cache.get(cache_key_ann):
-            DataFetcher._sync_announcements(db, stock)
-            cache.set(cache_key_ann, True, settings.cache_ttl_financials)
+        # 公告：不在请求路径上做【全市场】公告抓取（这是最重的一步），
+        # 改为后台异步同步。本次返回数据库已有公告（首次可能为空，
+        # 稍后刷新或再次进入即可见），避免拖慢首屏。
+        if not stock.announcements and not cache.get(f"ann_synced:{code}"):
+            DataFetcher._trigger_announcements_sync_async(code)
 
         db.refresh(stock)
         return {
@@ -461,9 +579,17 @@ class DataFetcher:
     # ========== 财务数据获取（供 API / AI 使用）==========
 
     @staticmethod
-    def get_financials(db: Session, stock: Stock) -> list[dict]:
-        """获取股票的财务数据列表（含计算指标）"""
-        if not stock.financials:
+    def get_financials(
+        db: Session, stock: Stock, fetch_if_missing: bool = True
+    ) -> list[dict]:
+        """获取股票的财务数据列表（含计算指标）
+
+        :param fetch_if_missing: 数据库无财务数据时是否联网拉取。
+            批量场景（行业基准、同行对比、异动扫描）必须传 False，
+            否则会对成百上千只股票逐只联网拉取，造成启动/请求长时间卡死
+            （网络风暴）。仅单只股票详情页等场景才用默认 True。
+        """
+        if not stock.financials and fetch_if_missing:
             DataFetcher._sync_financials(db, stock)
             db.refresh(stock)
 
@@ -568,8 +694,13 @@ class DataFetcher:
         today = db_today or date.today()
         collected_days = 0
         offset = 0
+        start_ts = time.monotonic()
         # 最多向前找 14 个自然日，凑够 _NOTICE_LOOKBACK_DAYS 个有数据的交易日
         while collected_days < _NOTICE_LOOKBACK_DAYS and offset < 14:
+            # 总时间预算保护：避免逐天拉取把详情页/刷新拖到前端超时
+            if time.monotonic() - start_ts > _NOTICE_FETCH_BUDGET:
+                logger.warning("公告池抓取超出时间预算（%ss），提前结束", _NOTICE_FETCH_BUDGET)
+                break
             day = today - timedelta(days=offset)
             offset += 1
             if day.weekday() >= 5:  # 跳过周末
@@ -580,6 +711,7 @@ class DataFetcher:
                     symbol="全部",
                     date=day.strftime("%Y%m%d"),
                     retries=1,
+                    timeout=_NOTICE_CALL_TIMEOUT,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.debug("获取 %s 公告失败: %s", day, e)

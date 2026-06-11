@@ -11,7 +11,7 @@ from fastapi.responses import JSONResponse
 
 from app.database import engine
 from app.models.stock import Base
-from app.routers import stocks, analysis, reports, alerts, industry
+from app.routers import stocks, analysis, reports, alerts, industry, market
 from app.logger import setup_logging
 from app.background_tasks import start_background_tasks
 
@@ -33,9 +33,21 @@ async def lifespan(app: FastAPI):
         from app.database import SessionLocal
         from app.services.industry_analyzer import IndustryAnalyzer
         from app.services.alert_monitor import AlertMonitor
-        
+        from app.services.data_fetcher import DataFetcher
+        from app.models.stock import Stock
+
         db = SessionLocal()
         try:
+            # 预加载股票列表：仅当数据库为空时才阻塞同步，避免每次重启都重复下载。
+            # 这样冷启动后的首次搜索也能命中（而不是先返回空再后台补齐）。
+            stock_count = db.query(Stock).count()
+            if stock_count == 0:
+                logger.info("股票列表为空，启动时同步加载...")
+                DataFetcher._sync_stock_list(db)
+                logger.info("股票列表加载完成，共 %s 只", db.query(Stock).count())
+            else:
+                logger.info("股票列表已存在（%s 只），跳过启动预加载", stock_count)
+
             # 初始化行业基准数据
             logger.info("初始化行业基准数据...")
             IndustryAnalyzer.update_all_industry_benchmarks(db)
@@ -102,6 +114,7 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["AI分析"])
 app.include_router(reports.router, prefix="/api/reports", tags=["报告"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["异动监控"])
 app.include_router(industry.router, prefix="/api/industry", tags=["行业对标"])
+app.include_router(market.router, prefix="/api/market", tags=["行情技术面"])
 
 
 @app.get("/health")

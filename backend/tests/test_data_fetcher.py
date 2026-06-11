@@ -203,11 +203,43 @@ class TestSearch:
     def test_search_empty_keyword(self, db):
         assert DataFetcher.search_stock(db, "   ") == []
 
-    def test_search_miss_triggers_sync(self, db, monkeypatch):
+    def test_search_miss_is_nonblocking_and_triggers_background_sync(
+        self, db, monkeypatch
+    ):
+        """数据库未命中：立即返回空结果（不阻塞网络下载），并触发后台同步。
+
+        这是消除「搜索超时」的关键行为——慢速的全量股票列表下载被移出请求路径，
+        改为后台异步执行，因此本次请求绝不会去碰网络。
+        """
+        calls = {"n": 0}
         monkeypatch.setattr(
-            df_module.ak, "stock_info_a_code_name",
-            lambda: pd.DataFrame({"code": ["000001"], "name": ["平安银行"]}),
+            DataFetcher,
+            "_trigger_stock_list_sync_async",
+            lambda: calls.__setitem__("n", calls["n"] + 1),
         )
+
+        # 若请求路径上意外触发了网络同步，立即失败
+        def boom():
+            raise AssertionError("搜索请求路径上不应触发网络同步")
+
+        monkeypatch.setattr(df_module.ak, "stock_info_a_code_name", boom)
+
         results = DataFetcher.search_stock(db, "平安")
-        assert len(results) == 1
-        assert results[0]["code"] == "000001"
+        assert results == []          # 未命中立即返回空，不阻塞
+        assert calls["n"] == 1        # 但已触发一次后台同步
+
+    def test_sync_stock_list_populates_db(self, db, monkeypatch):
+        """后台同步逻辑本身：把 akshare 股票列表写入数据库，后续搜索即可命中。"""
+        monkeypatch.setattr(
+            df_module.ak,
+            "stock_info_a_code_name",
+            lambda: pd.DataFrame(
+                {"code": ["000001", "600519"], "name": ["平安银行", "贵州茅台"]}
+            ),
+        )
+        DataFetcher._sync_stock_list(db)
+        assert db.query(Stock).count() == 2
+
+        hit = DataFetcher._query_stocks(db, "平安")
+        assert len(hit) == 1
+        assert hit[0]["code"] == "000001"

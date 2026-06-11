@@ -13,8 +13,8 @@ router = APIRouter()
 
 
 @router.post("/quick/{code}", response_model=QuickAnalysisResponse)
-async def quick_analysis(code: str, db: Session = Depends(get_db)):
-    """快速分析一只股票"""
+def quick_analysis(code: str, db: Session = Depends(get_db)):
+    """快速分析一只股票（同步 def：AI 调用为阻塞操作，交由线程池执行）"""
     stock = db.query(Stock).filter(Stock.code == code).first()
     if not stock:
         raise HTTPException(status_code=404, detail=f"股票 {code} 不存在")
@@ -27,7 +27,7 @@ async def quick_analysis(code: str, db: Session = Depends(get_db)):
 
 
 @router.post("/deep/{code}", response_model=DeepAnalysisResponse)
-async def deep_analysis(
+def deep_analysis(
     code: str,
     focus: str = "full",
     user_id: str = "default",

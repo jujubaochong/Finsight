@@ -144,3 +144,89 @@ export interface IndustryComparison {
   top_peers: IndustryPeer[]
   error?: string
 }
+
+
+// ====== 行情 / 技术面 / 资金面 ======
+
+export interface MarketSnapshot {
+  code: string
+  latest: {
+    date: string | null
+    close: number | null
+    pct_chg: number | null
+    turnover: number | null
+    chg_5d: number | null
+  }
+  indicators: {
+    ma5?: number | null
+    ma10?: number | null
+    ma20?: number | null
+    ma60?: number | null
+    macd_dif?: number | null
+    macd_dea?: number | null
+    macd?: number | null
+    macd_cross?: 'golden' | 'dead' | 'none'
+    kdj_k?: number | null
+    kdj_d?: number | null
+    kdj_j?: number | null
+    rsi?: number | null
+    series?: { date: string; close: number; dif: number; dea: number; macd: number }[]
+  }
+  fund_flow: {
+    signal?: 'accumulate' | 'distribute' | 'neutral'
+    label?: string
+    main_net_5d?: number
+    main_net_today?: number
+    main_net_pct_today?: number | null
+    positive_days_5d?: number
+    series?: { date: string; main_net: number; pct_chg: number | null }[]
+  }
+  lhb: {
+    date: string
+    reason: string
+    interpret: string
+    net_buy: number | null
+    pct_chg: number | null
+    after_1d: number | null
+    after_5d: number | null
+  }[]
+  main_phase?: {
+    phase: 'building' | 'launching' | 'leaving' | 'unknown'
+    label: string
+    color: 'orange' | 'red' | 'green' | 'gray'
+    reasons: string[]
+  }
+}
+
+export interface ShortTermResult {
+  rating: string
+  phase: string
+  summary: string
+  technical: string
+  capital: string
+  phase_reason: string
+  opportunities: string[]
+  risks: string[]
+  lhb_note: string
+}
+
+export interface IndustryBoard {
+  name: string
+  pct_chg: number | null
+  lead_stock: string
+  price: number | null
+}
+
+export interface PotentialStock {
+  code: string
+  name: string
+  price: number | null
+  pct_chg: number | null
+  main_net: number
+  main_net_pct: number | null
+}
+
+export interface MarketOverview {
+  boards: IndustryBoard[]
+  potential: PotentialStock[]
+}

@@ -247,7 +247,7 @@ class AlertMonitor:
         from app.services.data_fetcher import DataFetcher
 
         alerts = []
-        financials = DataFetcher.get_financials(db, stock)
+        financials = DataFetcher.get_financials(db, stock, fetch_if_missing=False)
         if not financials or len(financials) < 2:
             return alerts
 
