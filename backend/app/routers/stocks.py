@@ -86,21 +86,34 @@ def get_stock_detail(code: str, db: Session = Depends(get_db)):
 def refresh_stock_data(code: str, db: Session = Depends(get_db)):
     """强制刷新某只股票的数据
 
-    同步 ``def``：刷新会逐项重新拉取 akshare 财务与公告数据（阻塞），由线程池执行，
-    避免阻塞事件循环。配合 data_fetcher 中的单次调用超时与公告抓取时间预算，
-    刷新会在有限时间内返回（即使部分数据源不可用也会降级而非卡死）。
+    同步 ``def``：由 FastAPI 线程池执行，避免阻塞事件循环。
+
+    刷新分两条路径，确保接口本身不会超过前端超时：
+      - 财务数据：单只股票的【定向】查询，已被单次调用超时（12s）兜底，
+        因此同步刷新，刷新返回时前端即可见最新财务数据。
+      - 公告：需要抓取【全市场】单日公告（最重的一步，时间预算可达 ~130s，
+        远超前端 60s 超时），改为**后台异步**刷新——若仍同步执行，刷新接口
+        会和详情页一样卡死/超时。新公告会在后台同步完成后，于下次进入详情或
+        再次刷新时可见。
     """
     stock = db.query(Stock).filter(Stock.code == code).first()
     if not stock:
         raise HTTPException(status_code=404, detail=f"股票 {code} 不存在")
-    # 失效缓存，确保拉取最新数据
+    # 失效缓存，确保拉取最新数据。
+    # 注意：不删除 ``ann_syncing:{code}``——若已有后台公告同步在进行中，
+    # 本次刷新让 _trigger_announcements_sync_async 自然成为 no-op，
+    # 避免重复触发【全市场】公告抓取（很重）造成并发浪费。
     cache.delete(f"fin_synced:{code}")
     cache.delete(f"ann_synced:{code}")
     cache.delete("notice_pool")
-    # 重新拉取
+    # 财务：同步刷新（定向查询，受单次调用超时兜底）
     DataFetcher._sync_financials(db, stock)
-    DataFetcher._sync_announcements(db, stock)
-    return {"success": True, "message": f"已刷新 {code} 的数据"}
+    # 公告：后台异步刷新（全市场抓取很重，不放在请求路径上，避免超时）
+    DataFetcher._trigger_announcements_sync_async(code)
+    return {
+        "success": True,
+        "message": f"已刷新 {code} 的财务数据，公告正在后台更新",
+    }
 
 
 # ====== 自选股 ======
