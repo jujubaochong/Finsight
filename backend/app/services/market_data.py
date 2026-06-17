@@ -150,8 +150,56 @@ def fetch_fundflow(code: str) -> list[dict]:
                 "m_net": _safe_float(r.get("中单净流入-净额")),
                 "s_net": _safe_float(r.get("小单净流入-净额")),
             })
+
+    # 兜底：akshare(Python requests) 被东财 TLS 指纹拦截时，改用系统 curl 子进程抓取
+    if not rows:
+        rows = _fetch_fundflow_via_curl(code)
+
     if rows:
         cache.set(ck, rows, _TTL_FUNDFLOW)
+    return rows
+
+
+def _fetch_fundflow_via_curl(code: str) -> list[dict]:
+    """用 curl 直接抓东财资金流 daykline 接口（与 akshare 同一 API）。"""
+    from app.net_setup import curl_get_json
+
+    market_map = {"sh": 1, "sz": 0, "bj": 0}
+    params = {
+        "lmt": "0",
+        "klt": "101",
+        "secid": f"{market_map[_market_of(code)]}.{code}",
+        "fields1": "f1,f2,f3,f7",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63,f64,f65",
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+    }
+    data = curl_get_json(
+        "https://push2his.eastmoney.com/api/qt/stock/fflow/daykline/get", params
+    )
+    rows: list[dict] = []
+    try:
+        klines = (data or {}).get("data", {}).get("klines", [])
+    except AttributeError:
+        klines = []
+    if not klines:
+        return rows
+    logger.info("资金流改用 curl 兜底成功: %s (%s 条)", code, len(klines))
+    # 字段顺序见 akshare: 日期,主力净额,小单,中单,大单,超大单,主力占比,小单占比,中单占比,大单占比,超大单占比,收盘价,涨跌幅,-,-
+    for item in klines:
+        p = item.split(",")
+        if len(p) < 13:
+            continue
+        rows.append({
+            "date": p[0],
+            "close": _safe_float(p[11]),
+            "pct_chg": _safe_float(p[12]),
+            "main_net": _safe_float(p[1]),
+            "main_net_pct": _safe_float(p[6]),
+            "xl_net": _safe_float(p[5]),
+            "l_net": _safe_float(p[4]),
+            "m_net": _safe_float(p[3]),
+            "s_net": _safe_float(p[2]),
+        })
     return rows
 
 

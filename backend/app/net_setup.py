@@ -117,3 +117,50 @@ def force_ipv4() -> None:
         _u3conn.allowed_gai_family = lambda: _socket.AF_INET  # type: ignore[assignment]
     except Exception as e:  # noqa: BLE001
         logger.warning("urllib3 IPv4 强制失败（不影响启动）: %s", e)
+
+
+
+def curl_get_json(url: str, params: dict | None = None, timeout: int = 20):
+    """用系统 curl 子进程抓取 JSON（绕过 Python 的 TLS 指纹被拦截问题）。
+
+    背景：部分网络环境下，东方财富会主动重置 Python(urllib3/OpenSSL) 的连接
+    （RemoteDisconnected），但系统 curl（Windows schannel TLS）可以正常访问。
+    因此对这类被拦截的接口，改用 curl 子进程兜底抓取。
+
+    返回解析后的 dict/list；失败返回 None。
+    """
+    import json
+    import shutil
+    import subprocess
+    import urllib.parse
+
+    curl_bin = shutil.which("curl")
+    if not curl_bin:
+        return None
+
+    if params:
+        # 东财参数里有 + 等字符，需正确编码；safe 保留逗号/冒号常见分隔符
+        query = urllib.parse.urlencode(params, safe=":,+")
+        url = f"{url}?{query}"
+
+    try:
+        proc = subprocess.run(
+            [
+                curl_bin, "-s", "--max-time", str(timeout),
+                "-H", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "-H", "Accept: */*",
+                url,
+            ],
+            capture_output=True, timeout=timeout + 5,
+        )
+        out = proc.stdout.decode("utf-8", errors="ignore").strip()
+        if not out:
+            return None
+        # 东财部分接口返回 jsonp 包裹，去掉外层回调
+        if out.startswith("(") and out.endswith(")"):
+            out = out[1:-1]
+        return json.loads(out)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("curl 抓取失败 %s: %s", url, e)
+        return None
