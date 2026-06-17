@@ -48,22 +48,24 @@ def _safe_float(v) -> Optional[float]:
 # ============== 原始数据抓取（带缓存） ==============
 
 def fetch_kline(code: str, days: int = _KLINE_DAYS) -> list[dict]:
-    """拉取日K线（前复权）。返回 [{date, open, high, low, close, volume, amount, pct_chg, turnover}]"""
+    """拉取日K线（前复权）。东财失败时自动切换到新浪源，提升可用性。
+
+    返回 [{date, open, high, low, close, volume, amount, pct_chg, turnover}]
+    """
     ck = f"kline:{code}:{days}"
     cached = cache.get(ck)
-    if cached is not None:
+    if cached:  # 空结果不缓存，便于下次重试
         return cached
 
+    rows: list[dict] = []
+
+    # 数据源1：东方财富（字段全，含涨跌幅/换手率）
     start = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
     df = _retry_akshare(
         ak.stock_zh_a_hist,
-        symbol=code,
-        period="daily",
-        adjust="qfq",
-        start_date=start,
+        symbol=code, period="daily", adjust="qfq", start_date=start,
         retries=2,
     )
-    rows: list[dict] = []
     if df is not None and not df.empty:
         for _, r in df.iterrows():
             rows.append({
@@ -77,7 +79,35 @@ def fetch_kline(code: str, days: int = _KLINE_DAYS) -> list[dict]:
                 "pct_chg": _safe_float(r.get("涨跌幅")),
                 "turnover": _safe_float(r.get("换手率")),
             })
-    cache.set(ck, rows, _TTL_KLINE)
+
+    # 数据源2（兜底）：新浪。东财失败/为空时启用，自行补算涨跌幅
+    if not rows:
+        logger.info("东财K线失败，尝试新浪源: %s", code)
+        sina_symbol = f"{_market_of(code)}{code}"
+        df2 = _retry_akshare(ak.stock_zh_a_daily, symbol=sina_symbol, adjust="qfq", retries=2)
+        if df2 is not None and not df2.empty:
+            df2 = df2.tail(days)
+            prev_close = None
+            for _, r in df2.iterrows():
+                close = _safe_float(r.get("close"))
+                pct = None
+                if prev_close and close is not None and prev_close != 0:
+                    pct = round((close - prev_close) / prev_close * 100, 2)
+                prev_close = close
+                rows.append({
+                    "date": str(r.get("date", ""))[:10],
+                    "open": _safe_float(r.get("open")),
+                    "high": _safe_float(r.get("high")),
+                    "low": _safe_float(r.get("low")),
+                    "close": close,
+                    "volume": _safe_float(r.get("volume")),
+                    "amount": _safe_float(r.get("amount")),
+                    "pct_chg": pct,
+                    "turnover": _safe_float(r.get("turnover")) if "turnover" in df2.columns else None,
+                })
+
+    if rows:
+        cache.set(ck, rows, _TTL_KLINE)
     return rows
 
 
@@ -85,7 +115,7 @@ def fetch_fundflow(code: str) -> list[dict]:
     """拉取个股资金流（主力/超大单/大单/中单/小单净额及占比）"""
     ck = f"fundflow:{code}"
     cached = cache.get(ck)
-    if cached is not None:
+    if cached:  # 空结果不缓存
         return cached
 
     df = _retry_akshare(
@@ -108,7 +138,8 @@ def fetch_fundflow(code: str) -> list[dict]:
                 "m_net": _safe_float(r.get("中单净流入-净额")),
                 "s_net": _safe_float(r.get("小单净流入-净额")),
             })
-    cache.set(ck, rows, _TTL_FUNDFLOW)
+    if rows:
+        cache.set(ck, rows, _TTL_FUNDFLOW)
     return rows
 
 
