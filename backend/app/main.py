@@ -3,7 +3,19 @@ FinSight FastAPI 应用入口
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
+
+# 默认让数据抓取直连数据源（东方财富/新浪等），忽略系统代理。
+# 很多用户机器残留了已关闭梯子的代理设置（HTTP(S)_PROXY 环境变量或系统代理），
+# 会导致 akshare 请求报 ProxyError 而完全拿不到行情数据。
+# 如确需走代理，把环境变量 FINSIGHT_USE_SYSTEM_PROXY 设为 1 即可保留系统代理。
+if os.getenv("FINSIGHT_USE_SYSTEM_PROXY", "0") != "1":
+    for _var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+        os.environ.pop(_var, None)
+    # 即便后续有库尝试读取系统代理，也通过 NO_PROXY 兜底放行东方财富/新浪域名
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
