@@ -451,8 +451,45 @@ def fetch_industry_boards(top: int = 8) -> list[dict]:
                     "lead_stock": str(r.get(c_lead, "")) if c_lead else "",
                     "price": _safe_float(r.get(c_price)) if c_price else None,
                 })
+
+    # 兜底：akshare 被拦时改用 curl 抓东财板块行情接口
+    if not rows:
+        rows = _fetch_boards_via_curl(top)
+
     if rows:
         cache.set(ck, rows, _TTL_OVERVIEW)
+    return rows
+
+
+def _fetch_boards_via_curl(top: int = 8) -> list[dict]:
+    """curl 兜底：东财行业板块行情。fs=m:90+t:2 为行业板块，按涨跌幅(f3)降序。"""
+    from app.net_setup import curl_get_json
+
+    params = {
+        "pn": "1", "pz": "50", "po": "1", "np": "1",
+        "fltt": "2", "invt": "2", "fid": "f3",
+        "fs": "m:90 t:2",
+        "fields": "f2,f3,f12,f14,f128",  # 最新价,涨跌幅,代码,名称,领涨股
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+    }
+    data = curl_get_json("https://17.push2.eastmoney.com/api/qt/clist/get", params)
+    rows: list[dict] = []
+    try:
+        diff = (data or {}).get("data", {}).get("diff", [])
+    except AttributeError:
+        diff = []
+    # diff 可能是 dict（{"0":{...}}）或 list
+    items = diff.values() if isinstance(diff, dict) else (diff or [])
+    for it in items:
+        rows.append({
+            "name": str(it.get("f14", "")),
+            "pct_chg": _safe_float(it.get("f3")),
+            "lead_stock": str(it.get("f128", "")),
+            "price": _safe_float(it.get("f2")),
+        })
+    rows = [r for r in rows if r["name"]][:top]
+    if rows:
+        logger.info("板块改用 curl 兜底成功 (%s 条)", len(rows))
     return rows
 
 
@@ -508,8 +545,54 @@ def fetch_potential_stocks(top: int = 10) -> list[dict]:
                     "main_net": round((_safe_float(r.get(c_main)) or 0) / 1e8, 2),
                     "main_net_pct": _safe_float(r.get(c_main_pct)) if c_main_pct else None,
                 })
+
+    # 兜底：akshare 被拦时改用 curl 抓东财资金流排行接口
+    if not rows:
+        rows = _fetch_potential_via_curl(top)
+
     if rows:
         cache.set(ck, rows, _TTL_OVERVIEW)
+    return rows
+
+
+def _fetch_potential_via_curl(top: int = 10) -> list[dict]:
+    """curl 兜底：东财个股资金流排行（按今日主力净流入 f62 降序）。"""
+    from app.net_setup import curl_get_json
+
+    params = {
+        "pn": "1", "pz": "60", "po": "1", "np": "1",
+        "fltt": "2", "invt": "2", "fid": "f62",
+        "fs": "m:0 t:6 f:!2,m:0 t:13 f:!2,m:1 t:2 f:!2,m:1 t:23 f:!2",
+        "fields": "f12,f14,f2,f3,f62,f184",  # 代码,名称,最新价,涨跌幅,主力净额,主力净占比
+        "ut": "b2884a393a59ad64002292a3e90d46a5",
+    }
+    data = curl_get_json("https://push2.eastmoney.com/api/qt/clist/get", params)
+    rows: list[dict] = []
+    try:
+        diff = (data or {}).get("data", {}).get("diff", [])
+    except AttributeError:
+        diff = []
+    items = diff.values() if isinstance(diff, dict) else (diff or [])
+    picked = []
+    for it in items:
+        code = str(it.get("f12", "")).strip()
+        main_net = _safe_float(it.get("f62"))
+        pct = _safe_float(it.get("f3"))
+        if len(code) != 6 or not code.isdigit() or main_net is None or main_net <= 0:
+            continue
+        picked.append({
+            "code": code,
+            "name": str(it.get("f14", "")),
+            "price": _safe_float(it.get("f2")),
+            "pct_chg": pct,
+            "main_net": round(main_net / 1e8, 2),
+            "main_net_pct": _safe_float(it.get("f184")),
+        })
+    # 优先强势非追高(1%~8%)，不足则放宽
+    strong = [r for r in picked if r["pct_chg"] is not None and 1 <= r["pct_chg"] <= 8]
+    rows = (strong if len(strong) >= 5 else picked)[:top]
+    if rows:
+        logger.info("潜力股改用 curl 兜底成功 (%s 条)", len(rows))
     return rows
 
 
