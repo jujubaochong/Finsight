@@ -5,7 +5,7 @@ import axios from 'axios'
 import type {
   StockDetail, SearchResponse, QuickAnalysisResult, ReportInfo,
   WatchlistItem, AlertItem, IndustryComparison, MarketSnapshot, ShortTermResult,
-  MarketOverview,
+  MarketOverview, DecisionSnapshot, DecisionResult, RiskReward,
 } from '../types/stock'
 
 const api = axios.create({
@@ -129,6 +129,20 @@ export async function shortTermResearch(code: string): Promise<{ code: string; n
 
 export async function getMarketOverview(): Promise<MarketOverview> {
   const { data } = await api.get('/market/overview')
+  return data
+}
+
+export async function getDecisionSnapshot(code: string): Promise<DecisionSnapshot> {
+  const { data } = await api.get(`/market/decision/${code}`)
+  return data
+}
+
+export async function compareDecision(
+  code: string,
+  direction: string,
+  horizon: string,
+): Promise<{ code: string; name: string; decision: DecisionResult; risk_reward: RiskReward }> {
+  const { data } = await api.post(`/market/decision/${code}`, { direction, horizon })
   return data
 }
 

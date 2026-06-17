@@ -210,6 +210,40 @@ export interface ShortTermResult {
   lhb_note: string
 }
 
+export interface RiskReward {
+  price?: number
+  stop_loss?: number
+  target?: number
+  risk_pct?: number
+  reward_pct?: number
+  risk_reward_ratio?: number
+  rr_label?: string
+  atr?: number
+  volatility_20d?: number
+  support_20d?: number
+  resistance_60d?: number
+}
+
+export interface DecisionSnapshot {
+  code: string
+  latest: MarketSnapshot['latest']
+  risk_reward: RiskReward
+  main_phase?: MarketSnapshot['main_phase']
+  fund_flow?: Record<string, unknown>
+}
+
+export interface DecisionResult {
+  ai_direction: string
+  ai_horizon: string
+  horizon_reason: string
+  confidence: string
+  risk_reward_comment: string
+  consistency: string
+  divergence: string
+  key_factors: string[]
+  blind_spots: string[]
+}
+
 export interface IndustryBoard {
   name: string
   pct_chg: number | null

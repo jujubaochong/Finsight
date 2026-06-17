@@ -10,6 +10,7 @@ import type { QuickAnalysisResult, MarketSnapshot, ShortTermResult } from '../ty
 import AIAnalysis from '../components/AIAnalysis'
 import TechnicalPanel from '../components/TechnicalPanel'
 import ShortTermAnalysis from '../components/ShortTermAnalysis'
+import DecisionBoard from '../components/DecisionBoard'
 import FinancialCharts from '../components/FinancialCharts'
 import IndustryComparison from '../components/IndustryComparison'
 import SearchBar from '../components/SearchBar'
@@ -273,6 +274,9 @@ export default function StockDetailPage() {
         onGenerate={handleShortTerm}
         generated={shortTermGenerated}
       />
+
+      {/* 决策对照台 */}
+      <DecisionBoard code={data.code} />
 
       {/* 财务图表 */}
       <FinancialCharts financials={data.financials} />

@@ -475,3 +475,125 @@ def short_term_analysis(code: str, name: str, industry: str, snapshot: dict) -> 
                 time.sleep(2 ** attempt)
     logger.error(f"短线研判最终失败: {code}")
     return fallback
+
+
+
+# ========== 决策对照台：长短线倾向 + 与用户预期对照 ==========
+
+SYSTEM_PROMPT_DECISION = """你是一名中立、克制的A股投研陪练。你的职责【不是替用户做决定】，
+而是给出一个独立、有数据支撑的判断，供用户与自己的预期做对照、发现分歧。
+
+== 输入数据 ==
+- 基本面：近几期财务核心指标（营收/净利/增速/ROE/负债率等）
+- 技术面：均线、MACD、KDJ、RSI
+- 资金面：主力净流入趋势、主力阶段（建仓/启动/离场）
+- 风险收益：客观算法给出的参考止损位、目标位、赔率、波动率
+- 用户预期：用户自己的看法（方向 看多/看空/不确定，周期 长线/短线/未定）
+
+== 输出格式 ==
+只输出纯JSON（不要markdown代码块）：
+
+{{
+  "ai_direction": "AI 的方向判断：看多/看空/中性",
+  "ai_horizon": "AI 认为更适合的周期：长线/短线/均可/都不建议",
+  "horizon_reason": "为什么是长线或短线：长线看基本面（成长性/盈利质量），短线看技术面+资金面。结合数据2-3句",
+  "confidence": "AI 对该判断的置信度：高/中/低（数据不足要说低）",
+  "risk_reward_comment": "用通俗的话解读赔率：如'下行约X%到止损、上行约Y%到压力位，盈亏比Z，意味着……'",
+  "consistency": "与用户预期是否一致：一致/部分一致/分歧（仅在提供了用户预期时判断，否则填 未提供）",
+  "divergence": "如果与用户预期有分歧，指出分歧点和各自依据；一致则说明共同支撑的理由（2-3句）",
+  "key_factors": ["影响判断的关键因素1（带数据）", "因素2", "因素3"],
+  "blind_spots": ["提醒用户容易忽略的点1", "点2"]
+}}
+
+== 严格约束 ==
+1. 所有数字引用输入数据，不能编造
+2. 不能给出明确买卖指令、具体买卖价、仓位百分比
+3. 语气中立，明确这是“供对照参考”，不是投资建议
+4. 与用户预期对照时要客观：用户看多而你看空，要尊重地指出依据，不强行附和
+5. 数据不足时置信度填“低”并说明
+6. 不要输出 markdown 代码块标记"""
+
+
+def decision_analysis(
+    code: str,
+    name: str,
+    industry: str,
+    snapshot: dict,
+    financials: list[dict],
+    user_expectation: dict | None = None,
+) -> dict:
+    """决策对照：AI 给出方向/周期判断 + 风险收益解读 + 与用户预期对照。
+
+    user_expectation: {"direction": "bullish/bearish/unsure", "horizon": "long/short/unsure"}
+    """
+    exp = user_expectation or {}
+    # 缓存按 代码 + 用户预期 区分（不同预期对照结果不同）
+    cache_key = f"decision:{code}:{exp.get('direction','')}:{exp.get('horizon','')}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
+    dir_map = {"bullish": "看多", "bearish": "看空", "unsure": "不确定"}
+    hor_map = {"long": "长线", "short": "短线", "unsure": "未定"}
+
+    context = {
+        "股票代码": code,
+        "股票名称": name,
+        "行业": industry or "未知",
+        "基本面_近几期财务": [
+            {k: v for k, v in f.items() if v is not None} for f in (financials or [])[-6:]
+        ],
+        "技术面": {k: v for k, v in snapshot.get("indicators", {}).items() if k != "series"},
+        "资金面": {k: v for k, v in snapshot.get("fund_flow", {}).items() if k != "series"},
+        "主力阶段": snapshot.get("main_phase", {}),
+        "风险收益预估": snapshot.get("risk_reward", {}),
+        "用户预期": {
+            "方向": dir_map.get(exp.get("direction", ""), "未提供"),
+            "周期": hor_map.get(exp.get("horizon", ""), "未提供"),
+        } if user_expectation else "未提供",
+    }
+
+    fallback = {
+        "ai_direction": "中性",
+        "ai_horizon": "均可",
+        "horizon_reason": "AI 决策对照暂时不可用，请稍后重试（下方风险收益数据仍可参考）",
+        "confidence": "低",
+        "risk_reward_comment": "",
+        "consistency": "未提供" if not user_expectation else "分歧",
+        "divergence": "",
+        "key_factors": [],
+        "blind_spots": ["AI 服务暂时不可用，请检查 API 配置或网络"],
+    }
+
+    for attempt in range(settings.ai_max_retries):
+        try:
+            client = _get_client()
+            resp = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT_DECISION},
+                    {"role": "user", "content": json.dumps(context, ensure_ascii=False, indent=2)},
+                ],
+                temperature=0.3,
+                max_tokens=2200,
+            )
+            text = resp.choices[0].message.content.strip()
+            result = _parse_ai_json(text)
+            if "ai_direction" not in result:
+                raise ValueError("AI 返回缺少 ai_direction 字段")
+            for k, d in (
+                ("ai_direction", "中性"), ("ai_horizon", "均可"), ("horizon_reason", ""),
+                ("confidence", "中"), ("risk_reward_comment", ""),
+                ("consistency", "未提供" if not user_expectation else "分歧"),
+                ("divergence", ""), ("key_factors", []), ("blind_spots", []),
+            ):
+                result.setdefault(k, d)
+            cache.set(cache_key, result, settings.cache_ttl_analysis)
+            logger.info(f"决策对照完成: {code}")
+            return result
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"决策对照失败 (attempt {attempt + 1}): {code} - {e}")
+            if attempt < settings.ai_max_retries - 1:
+                time.sleep(2 ** attempt)
+    logger.error(f"决策对照最终失败: {code}")
+    return fallback

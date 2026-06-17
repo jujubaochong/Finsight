@@ -413,8 +413,99 @@ def get_market_snapshot(code: str, include_lhb: bool = False) -> dict:
     }
     # 主力阶段研判（规则推断）
     snap["main_phase"] = judge_main_phase(snap)
+    # 风险/收益预估（客观算法）
+    snap["risk_reward"] = estimate_risk_reward(snap, kline)
     return snap
 
+
+
+# ============== 风险/收益预估（纯算法，无AI、无网络） ==============
+
+def estimate_risk_reward(snapshot: dict, kline: list[dict]) -> dict:
+    """基于 K线 估算加仓的客观风险/收益参考值（赔率）。
+
+    方法（经典量价规则，非预测）：
+      - 当前价 = 最新收盘
+      - 参考止损位 = max(近20日最低, 当前价 - 2*ATR)（取更靠近现价者作为更稳健止损）
+      - 参考目标位 = 近60日最高（上方阻力）；若已突破则用 当前价 + 3*ATR
+      - 风险 = (现价-止损)/现价；收益 = (目标-现价)/现价；赔率 = 收益/风险
+      - 波动率 = 近20日日收益标准差（年化前的日波动，直观）
+    全部为客观计算值，仅供参考，不构成建议。
+    """
+    closes = [k["close"] for k in kline if k["close"] is not None]
+    highs = [k["high"] for k in kline if k["high"] is not None]
+    lows = [k["low"] for k in kline if k["low"] is not None]
+    if len(closes) < 25:
+        return {}
+
+    price = closes[-1]
+    if not price:
+        return {}
+
+    # ATR(14)：真实波幅均值
+    trs = []
+    for i in range(1, len(closes)):
+        tr = max(
+            highs[i] - lows[i],
+            abs(highs[i] - closes[i - 1]),
+            abs(lows[i] - closes[i - 1]),
+        )
+        trs.append(tr)
+    atr = sum(trs[-14:]) / min(14, len(trs)) if trs else 0
+
+    low20 = min(lows[-20:])
+    high60 = max(highs[-60:]) if len(highs) >= 60 else max(highs)
+
+    # 止损：取 近20日低点 与 现价-2ATR 中“更高”（更贴近现价、更稳健）的一个
+    stop = max(low20, price - 2 * atr)
+    if stop >= price:
+        stop = price - 2 * atr  # 保险
+
+    # 目标：上方阻力(近60日高)；若已接近/突破，用 现价+3ATR
+    target = high60
+    if target <= price * 1.01:
+        target = price + 3 * atr
+
+    risk_pct = round((price - stop) / price * 100, 2) if price else None
+    reward_pct = round((target - price) / price * 100, 2) if price else None
+    rr = None
+    if risk_pct and risk_pct > 0 and reward_pct is not None:
+        rr = round(reward_pct / risk_pct, 2)
+
+    # 波动率：近20日日收益标准差
+    rets = []
+    for i in range(len(closes) - 20, len(closes)):
+        if i > 0 and closes[i - 1]:
+            rets.append((closes[i] - closes[i - 1]) / closes[i - 1])
+    vol = None
+    if len(rets) >= 2:
+        mean = sum(rets) / len(rets)
+        var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+        vol = round((var ** 0.5) * 100, 2)
+
+    # 赔率定性
+    if rr is None:
+        rr_label = "数据不足"
+    elif rr >= 2:
+        rr_label = "盈亏比较好（>2:1）"
+    elif rr >= 1:
+        rr_label = "盈亏比一般（1~2:1）"
+    else:
+        rr_label = "盈亏比偏低（<1:1，风险大于潜在空间）"
+
+    return {
+        "price": round(price, 2),
+        "stop_loss": round(stop, 2),
+        "target": round(target, 2),
+        "risk_pct": risk_pct,            # 到止损的下行空间（%）
+        "reward_pct": reward_pct,        # 到目标的上行空间（%）
+        "risk_reward_ratio": rr,         # 赔率（收益/风险）
+        "rr_label": rr_label,
+        "atr": round(atr, 3),
+        "volatility_20d": vol,           # 近20日日波动率（%）
+        "support_20d": round(low20, 2),
+        "resistance_60d": round(high60, 2),
+    }
 
 
 # ============== 市场概览：板块 + 潜力股（首页用） ==============
