@@ -59,13 +59,17 @@ def fetch_kline(code: str, days: int = _KLINE_DAYS) -> list[dict]:
 
     rows: list[dict] = []
 
-    # 数据源1：东方财富（字段全，含涨跌幅/换手率）
+    # 数据源1：东方财富（字段全，含涨跌幅/换手率）。失败不抛出，转兜底。
     start = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
-    df = _retry_akshare(
-        ak.stock_zh_a_hist,
-        symbol=code, period="daily", adjust="qfq", start_date=start,
-        retries=2,
-    )
+    try:
+        df = _retry_akshare(
+            ak.stock_zh_a_hist,
+            symbol=code, period="daily", adjust="qfq", start_date=start,
+            retries=2,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("东财K线异常 %s: %s", code, e)
+        df = None
     if df is not None and not df.empty:
         for _, r in df.iterrows():
             rows.append({
@@ -80,11 +84,15 @@ def fetch_kline(code: str, days: int = _KLINE_DAYS) -> list[dict]:
                 "turnover": _safe_float(r.get("换手率")),
             })
 
-    # 数据源2（兜底）：新浪。东财失败/为空时启用，自行补算涨跌幅
+    # 数据源2（兜底）：新浪（服务器不同：hq.sinajs.cn）。东财失败/为空时启用。
     if not rows:
         logger.info("东财K线失败，尝试新浪源: %s", code)
         sina_symbol = f"{_market_of(code)}{code}"
-        df2 = _retry_akshare(ak.stock_zh_a_daily, symbol=sina_symbol, adjust="qfq", retries=2)
+        try:
+            df2 = _retry_akshare(ak.stock_zh_a_daily, symbol=sina_symbol, adjust="qfq", retries=2)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("新浪K线异常 %s: %s", code, e)
+            df2 = None
         if df2 is not None and not df2.empty:
             df2 = df2.tail(days)
             prev_close = None
@@ -118,12 +126,16 @@ def fetch_fundflow(code: str) -> list[dict]:
     if cached:  # 空结果不缓存
         return cached
 
-    df = _retry_akshare(
-        ak.stock_individual_fund_flow,
-        stock=code,
-        market=_market_of(code),
-        retries=2,
-    )
+    try:
+        df = _retry_akshare(
+            ak.stock_individual_fund_flow,
+            stock=code,
+            market=_market_of(code),
+            retries=2,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("资金流抓取异常 %s: %s", code, e)
+        df = None
     rows: list[dict] = []
     if df is not None and not df.empty:
         for _, r in df.iterrows():
