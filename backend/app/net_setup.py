@@ -106,3 +106,14 @@ def force_ipv4() -> None:
         logger.info("已强制使用 IPv4 直连（规避不通的 IPv6 路径）")
     except Exception as e:  # noqa: BLE001
         logger.warning("强制 IPv4 失败（不影响启动）: %s", e)
+
+    # urllib3 官方推荐的强制 IPv4 方式：requests 底层用 urllib3，
+    # 它通过 allowed_gai_family() 决定地址族。直接让它只返回 AF_INET，
+    # 比单独 patch socket 更可靠（双保险）。
+    try:
+        import socket as _socket
+        import urllib3.util.connection as _u3conn
+
+        _u3conn.allowed_gai_family = lambda: _socket.AF_INET  # type: ignore[assignment]
+    except Exception as e:  # noqa: BLE001
+        logger.warning("urllib3 IPv4 强制失败（不影响启动）: %s", e)
