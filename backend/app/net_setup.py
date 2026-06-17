@@ -80,3 +80,29 @@ def disable_system_proxy() -> None:
         logger.info("已禁用系统/环境代理，数据抓取将直连数据源")
     except Exception as e:  # noqa: BLE001
         logger.warning("禁用系统代理失败（不影响启动）: %s", e)
+
+
+def force_ipv4() -> None:
+    """强制网络请求只走 IPv4。
+
+    部分网络环境下 IPv6 到东方财富/新浪不通（连接被重置 RemoteDisconnected），
+    而系统/curl 默认优先 IPv6，导致 akshare 请求失败。这里让 socket 的地址解析
+    只返回 IPv4 结果，规避不通的 IPv6 路径。
+
+    如需恢复默认（同时尝试 v4/v6）：设环境变量 FINSIGHT_ALLOW_IPV6=1。
+    """
+    if os.getenv("FINSIGHT_ALLOW_IPV6", "0") == "1":
+        return
+    try:
+        import socket
+
+        _orig_getaddrinfo = socket.getaddrinfo
+
+        def _ipv4_only(host, port, family=0, type=0, proto=0, flags=0):
+            # 强制只解析 IPv4
+            return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+        socket.getaddrinfo = _ipv4_only  # type: ignore[assignment]
+        logger.info("已强制使用 IPv4 直连（规避不通的 IPv6 路径）")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("强制 IPv4 失败（不影响启动）: %s", e)

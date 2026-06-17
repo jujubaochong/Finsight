@@ -2,8 +2,9 @@
 FinSight FastAPI 应用入口
 """
 # 必须在导入 akshare/requests 相关模块之前执行：让数据抓取直连数据源、忽略系统代理。
-from app.net_setup import disable_system_proxy
+from app.net_setup import disable_system_proxy, force_ipv4
 disable_system_proxy()
+force_ipv4()
 
 import asyncio
 import logging
